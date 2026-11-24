@@ -1,0 +1,133 @@
+cmake_minimum_required(VERSION 3.20)
+
+if(NOT DEFINED CLI_EXECUTABLE OR NOT EXISTS "${CLI_EXECUTABLE}")
+    message(FATAL_ERROR "CLI_EXECUTABLE must name an existing executable")
+endif()
+
+set(cli_cases 0)
+function(check_cli expected_code expected_stream expected_text)
+    execute_process(
+        COMMAND "${CLI_EXECUTABLE}" ${ARGN}
+        RESULT_VARIABLE actual_code
+        OUTPUT_VARIABLE stdout
+        ERROR_VARIABLE stderr
+        TIMEOUT 5
+    )
+    if(NOT "${actual_code}" STREQUAL "${expected_code}")
+        message(FATAL_ERROR
+            "Arguments [${ARGN}]: expected exit ${expected_code}, got ${actual_code}\n"
+            "stdout: ${stdout}\nstderr: ${stderr}")
+    endif()
+
+    if(expected_stream STREQUAL "stdout")
+        set(actual_text "${stdout}")
+        set(other_text "${stderr}")
+    else()
+        set(actual_text "${stderr}")
+        set(other_text "${stdout}")
+    endif()
+    string(FIND "${actual_text}" "${expected_text}" match_position)
+    if(match_position EQUAL -1 OR NOT "${other_text}" STREQUAL "")
+        message(FATAL_ERROR
+            "Arguments [${ARGN}]: expected '${expected_text}' on ${expected_stream} only\n"
+            "stdout: ${stdout}\nstderr: ${stderr}")
+    endif()
+    set(last_stdout "${stdout}" PARENT_SCOPE)
+    math(EXPR count "${cli_cases} + 1")
+    set(cli_cases "${count}" PARENT_SCOPE)
+endfunction()
+
+function(check_text text expected)
+    string(FIND "${text}" "${expected}" position)
+    if(position EQUAL -1)
+        message(FATAL_ERROR "Missing '${expected}' in:\n${text}")
+    endif()
+endfunction()
+
+check_cli(0 stdout "Usage: bp_lcgcd")
+check_cli(0 stdout "Usage: bp_lcgcd" --help)
+check_cli(0 stdout "Usage: bp_lcgcd" -h)
+check_cli(0 stdout "SLVA demo DONE paths=16" --demo-slva)
+check_text("${last_stdout}" "rank=1 path(stage)=100000 cost=6")
+check_text("${last_stdout}" "rank=2 path(stage)=010001 cost=10")
+check_text("${last_stdout}" "rank=3 path(stage)=010100 cost=12")
+check_cli(2 stderr "USAGE_ERROR:" --demo-slva extra)
+check_cli(2 stderr "USAGE_ERROR:" --decoder gcd)
+foreach(decoder IN ITEMS lcgcd bp nms bp-lcgcd bp-osd)
+    check_cli(3 stderr "NOT_IMPLEMENTED: decoder '${decoder}'" --decoder "${decoder}")
+endforeach()
+check_cli(2 stderr "USAGE_ERROR: unknown decoder" --decoder unknown)
+check_cli(2 stderr "USAGE_ERROR:" --decoder)
+check_cli(2 stderr "USAGE_ERROR:" --unknown)
+check_cli(2 stderr "USAGE_ERROR:" --help extra)
+
+# Self-authored small matrices; fixtures stay inside the build directory.
+set(fixtures "${CMAKE_CURRENT_BINARY_DIR}/cli fixtures")
+file(MAKE_DIRECTORY "${fixtures}")
+set(h "${fixtures}/h7.txt")
+file(WRITE "${h}" "3 7\n1 0 0 1 1 0 1\n0 1 0 1 0 1 1\n0 0 1 0 1 1 1\n")
+file(WRITE "${fixtures}/permuted.txt" "2 4\n0 1 1 0\n0 0 1 1\n")
+file(WRITE "${fixtures}/redundant.txt" "2 2\n1 1\n1 1\n")
+file(WRITE "${fixtures}/identity.txt" "2 2\n1 0\n0 1\n")
+file(WRITE "${fixtures}/bad.txt" "1 2\n1 2\n")
+set(frame --decoder gcd --matrix "${h}")
+set(llr "-8 -3 -6 1 2 4 7")
+set(weights "8 3 6 1 2 4 7")
+
+check_cli(0 stdout "optimality_proven=1 stop_reason=bound" ${frame} --llr "${llr}")
+check_text("${last_stdout}" "estimate_type=codeword estimate=1010100 cost=5")
+check_text("${last_stdout}" "candidates_popped=5 candidates_evaluated=5 nodes_expanded=5 batches=0")
+set(plain "${last_stdout}")
+check_cli(0 stdout "trace candidate=1" ${frame} --llr "${llr}" --trace)
+check_text("${last_stdout}" "trace reference(original)=1110000")
+check_text("${last_stdout}" "trace s_res(original_rows)=111")
+# Hand-calculated first three candidates, in systematic I/P coordinates.
+set(first_three "trace candidate=1 f_P(sys)=0000 W_P=0 f_I(sys)=111 W=17 best=17 improved=1\ntrace candidate=2 f_P(sys)=1000 W_P=1 f_I(sys)=001 W=7 best=7 improved=1\ntrace candidate=3 f_P(sys)=0100 W_P=2 f_I(sys)=010 W=5 best=5 improved=1\n")
+check_text("${last_stdout}" "${first_three}")
+check_text("${last_stdout}" "trace candidate=4 f_P(sys)=1100 W_P=3 f_I(sys)=100 W=11 best=5 improved=0")
+check_text("${last_stdout}" "trace stop=bound next_W_P=5 >= best=5")
+string(REGEX REPLACE "trace [^\n]*\n" "" untraced "${last_stdout}")
+if(NOT "${untraced}" STREQUAL "${plain}")
+    message(FATAL_ERROR "Enabling trace changed the result/statistics")
+endif()
+check_cli(5 stdout "status=TRUNCATED candidate_valid=1 optimality_proven=0 stop_reason=budget"
+    ${frame} --llr "${llr}" --limit 3 --trace)
+check_text("${last_stdout}" "${first_three}")
+check_text("${last_stdout}" "trace stop=budget evaluated=3 limit=3 next_W_P=3 < best=5")
+check_cli(5 stdout "estimate=0000000 cost=17" ${frame} --llr "${llr}" --limit 1)
+check_cli(0 stdout "optimality_proven=1 stop_reason=bound" ${frame} --llr "${llr}" --limit 5)
+check_cli(0 stdout "estimate_type=error estimate=0100100 cost=5"
+    ${frame} --mode syndrome --syndrome 111 --weights "${weights}")
+check_cli(0 stdout "estimate_type=error estimate=1010100 cost=5"
+    ${frame} --mode syndrome --syndrome 000 --hint 1110000 --weights "${weights}")
+check_cli(0 stdout "estimate_type=error estimate=1010100 cost=5"
+    ${frame} --mode bp-syndrome --syndrome 000 --llr "${llr}")
+check_cli(0 stdout "estimate=0001 cost=1" --decoder gcd --matrix "${fixtures}/permuted.txt"
+    --mode syndrome --syndrome 01 --weights "8 3 6 1" --trace)
+check_text("${last_stdout}" "sys_to_orig=1,2,0,3")
+check_text("${last_stdout}" "trace U_s_res=11")
+check_cli(0 stdout "stop_reason=exhausted" --decoder gcd --matrix "${fixtures}/identity.txt"
+    --llr "-2 3" --trace)
+check_text("${last_stdout}" "f_P(sys)=- W_P=0 f_I(sys)=10 W=2")
+check_text("${last_stdout}" "trace stop=exhausted")
+check_cli(4 stderr "DECODE_ERROR: INCONSISTENT_SYNDROME" --decoder gcd
+    --matrix "${fixtures}/redundant.txt" --mode syndrome --syndrome 01 --weights "2 1")
+check_cli(4 stderr "INPUT_ERROR:" --decoder gcd --matrix "${fixtures}/missing.txt" --llr "1 2")
+check_cli(4 stderr "INPUT_ERROR:" --decoder gcd --matrix "${fixtures}/bad.txt" --llr "1 2")
+foreach(bad IN ITEMS "1 2" "1 2 3 4 5 6 7 8" "1 2 3 4 5 6 nan" "1 2 3 4 5 6 7junk")
+    check_cli(2 stderr "USAGE_ERROR:" ${frame} --llr "${bad}")
+endforeach()
+foreach(bad IN ITEMS "-1" "1.5" "18446744073709551616")
+    check_cli(2 stderr "USAGE_ERROR:" ${frame} --llr "${llr}" --limit "${bad}")
+endforeach()
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --mode syndrome --syndrome 111 --weights "-8 3 6 1 2 4 7")
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --mode syndrome --syndrome 11 --weights "${weights}")
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --mode syndrome --syndrome 11x --weights "${weights}")
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --mode syndrome --syndrome 111 --hint 1 --weights "${weights}")
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --mode unknown --llr "${llr}")
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --llr "${llr}" --syndrome 111)
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --mode syndrome --syndrome 111 --llr "${llr}")
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --mode bp-syndrome --syndrome 111 --hint 1110000 --llr "${llr}")
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --llr "${llr}" --limit)
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --llr "${llr}" --llr "${llr}")
+message(STATUS "CLI checks passed (${cli_cases} cases; 7-bit hand trace and three input modes)")
