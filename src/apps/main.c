@@ -17,7 +17,7 @@ static void print_help(void)
     puts("BP_LCGCD - single-frame GCD, bounded simulation and SLVA demo\n"
          "Usage: bp_lcgcd --help\n"
          "       bp_lcgcd --demo-slva\n"
-         "       bp_lcgcd --decoder gcd --matrix H.txt [--mode MODE] INPUT [OPTIONS]\n"
+         "       bp_lcgcd --decoder gcd|lcgcd --matrix H.txt [--mode MODE] INPUT [OPTIONS]\n"
          "       bp_lcgcd --decoder gcd --matrix H.txt --simulate --ebn0 DB\n"
          "         --frames N --errors N --csv PATH [--seed N] [--limit N]\n"
          "\n"
@@ -29,7 +29,8 @@ static void print_help(void)
          "Options:\n"
          "  -h, --help       Show this help (also shown with no arguments).\n"
          "  --demo-slva      Run the fixed S10-S13 example (stage-order local paths).\n"
-         "  --decoder NAME   gcd, lcgcd, bp, nms, bp-lcgcd, bp-osd; only gcd is implemented.\n"
+         "  --decoder NAME   gcd, lcgcd, bp, nms, bp-lcgcd, bp-osd; gcd/lcgcd are implemented.\n"
+         "  --delta N        LC-GCD local constraints, 0..rank(H); default 0.\n"
          "  --matrix PATH    H: positive rows/cols followed by whitespace-separated bits.\n"
          "  --mode MODE      Select one of the modes above.\n"
          "  --llr VALUES     Exactly N finite numbers, quoted and whitespace-separated.\n"
@@ -38,7 +39,7 @@ static void print_help(void)
          "  --hint BITS      Contiguous reference bits in original column order (default zero).\n"
          "  --limit N        Complete candidate budget; 0=unlimited (default).\n"
          "  --trace          Print preparation, every evaluated candidate and stop condition.\n"
-         "  --simulate       All-zero classical BPSK/AWGN at one Eb/N0 point.\n"
+         "  --simulate       GCD only: all-zero classical BPSK/AWGN at one Eb/N0 point.\n"
          "  --ebn0 DB        Finite Eb/N0 in dB for simulation.\n"
          "  --frames N       Positive simulation frame cap.\n"
          "  --errors N       Positive decoded frame-error cap.\n"
@@ -154,12 +155,12 @@ int main(int argc, char *argv[])
     }
     if (argc == 2 && !strcmp(argv[1], "--demo-slva")) return run_slva_demo();
     const char *decoder = NULL, *matrix_path = NULL, *mode = NULL, *llr_text = NULL;
-    const char *weights_text = NULL, *syndrome_text = NULL, *hint_text = NULL, *limit_text = NULL;
+    const char *weights_text = NULL, *syndrome_text = NULL, *hint_text = NULL, *limit_text = NULL, *delta_text = NULL;
     const char *ebn0_text = NULL, *frames_text = NULL, *errors_text = NULL, *seed_text = NULL, *csv_path = NULL;
     const struct { const char *name; const char **value; } options[] = {
         {"--decoder", &decoder}, {"--matrix", &matrix_path}, {"--mode", &mode},
         {"--llr", &llr_text}, {"--weights", &weights_text}, {"--syndrome", &syndrome_text},
-        {"--hint", &hint_text}, {"--limit", &limit_text}, {"--ebn0", &ebn0_text},
+        {"--hint", &hint_text}, {"--limit", &limit_text}, {"--delta", &delta_text}, {"--ebn0", &ebn0_text},
         {"--frames", &frames_text}, {"--errors", &errors_text}, {"--seed", &seed_text}, {"--csv", &csv_path}
     };
     bool trace = false, simulate = false;
@@ -180,7 +181,8 @@ int main(int argc, char *argv[])
         fputs("USAGE_ERROR: unknown decoder or missing --decoder. Use --help.\n", stderr);
         return CLI_USAGE_ERROR;
     }
-    if (strcmp(decoder, "gcd")) {
+    bool lc = strcmp(decoder, "lcgcd") == 0;
+    if (strcmp(decoder, "gcd") && !lc) {
         fprintf(stderr, "NOT_IMPLEMENTED: decoder '%s' is not available.\n", decoder);
         return CLI_NOT_IMPLEMENTED;
     }
@@ -191,16 +193,23 @@ int main(int argc, char *argv[])
     else if (!strcmp(mode, "bp-syndrome")) input.mode = DECODE_BP_SYNDROME;
     else { fputs("USAGE_ERROR: unknown mode. Use --help.\n", stderr); return CLI_USAGE_ERROR; }
     bool valid_options;
-    if (simulate) valid_options = input.mode == DECODE_CLASSICAL && !llr_text && !weights_text &&
+    if (simulate) valid_options = !lc && input.mode == DECODE_CLASSICAL && !llr_text && !weights_text &&
                                  !syndrome_text && !hint_text && ebn0_text && frames_text && errors_text && csv_path;
     else if (input.mode == DECODE_CLASSICAL) valid_options = llr_text && !weights_text && !syndrome_text && !hint_text;
     else if (input.mode == DECODE_SYNDROME) valid_options = syndrome_text && weights_text && !llr_text;
     else valid_options = syndrome_text && llr_text && !weights_text && !hint_text;
-    if (!matrix_path || !valid_options || (!simulate && (ebn0_text || frames_text || errors_text || seed_text || csv_path))) {
+    if (!matrix_path || !valid_options || (!lc && delta_text) ||
+        (!simulate && (ebn0_text || frames_text || errors_text || seed_text || csv_path))) {
         fputs("USAGE_ERROR: missing matrix/input or incompatible mode options. Use --help.\n", stderr);
         return CLI_USAGE_ERROR;
     }
     DecodeConfig config = {.decoder_name=decoder, .trace=trace ? stdout : NULL};
+    uint64_t delta = 0;
+    if (delta_text && (!parse_count(delta_text, &delta) || delta > SIZE_MAX)) {
+        fputs("USAGE_ERROR: --delta requires a nonnegative integer.\n", stderr);
+        return CLI_USAGE_ERROR;
+    }
+    config.delta = (size_t)delta;
     if (limit_text && !parse_count(limit_text, &config.candidate_limit)) {
         fputs("USAGE_ERROR: --limit requires a nonnegative integer.\n", stderr);
         return CLI_USAGE_ERROR;
@@ -275,7 +284,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "DECODE_ERROR: %s\n", status_name(status));
         goto cleanup;
     }
-    static const char *const stops[] = {"none", "bound", "exhausted", "budget"};
+    static const char *const stops[] = {"none", "bound", "exhausted", "budget", "resource"};
     printf("mode=%s status=%s candidate_valid=%d optimality_proven=%d stop_reason=%s\n",
            mode, status_name(status), (int)result.candidate_valid, (int)result.optimality_proven,
            stops[result.stop_reason]);

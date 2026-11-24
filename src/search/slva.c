@@ -184,7 +184,7 @@ fail:
     return status;
 }
 
-//从右向左逐个尝试“如果只把当前位置作为最后不同的位置，能否找到合法替代路径”
+
 //返回当前节点能够划分出的非空子组数量，stop_at_one 只用于快速判断是否至少有一个子组。
 static size_t alternative_count(const SlvaGenerator *g, const SlvaCandidate *node, int stop_at_one)
 {
@@ -279,7 +279,7 @@ static SlvaStatus expand_pending(SlvaGenerator *g)
 
             //bits 就是新子组的最轻代表路径，计算其代价并放入堆中
             SlvaCandidate *child = &g->heap[old_size+built++];
-            *child = (SlvaCandidate){.bits=bits, .free_length=j, .sequence=g->next_sequence+built-1};//生成一个候选分组，按.free_length = j定义（包含最小路径）
+            *child = (SlvaCandidate){.bits=bits, .free_length=j, .sequence=g->next_sequence+built-1};//生成一个候选分组，按最大不同位置.free_length = j定义（包含最小路径）
             status = score_path(t, bits, &child->cost);
             printf("cost = %f\n",child->cost);
             printf("----------------------------------\n");
@@ -295,6 +295,7 @@ static SlvaStatus expand_pending(SlvaGenerator *g)
     }
     print_slva_heap(g->heap, g->size);
 
+    if (built) ++g->nodes_expanded;
     g->next_sequence += built;
     release_path(g, g->pending.bits);
     g->pending = (SlvaCandidate){0};
@@ -348,6 +349,7 @@ SlvaStatus slva_next(SlvaGenerator *g, BitVector *path, double *cost)
     *cost = node.cost;
     ++g->paths_returned;
     if (alternative_count(g, &node, 1)) //输出最优分组代表，并保留剩余分组等待扩展
+        g->pending = node;
     else release_path(g, node.bits);
 
     /*printf("当前输出的候选路径为：\n");

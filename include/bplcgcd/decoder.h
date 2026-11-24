@@ -8,7 +8,7 @@ typedef enum { DECODE_CLASSICAL, DECODE_SYNDROME, DECODE_BP_SYNDROME } DecodeMod
 typedef enum {
     DECODE_NOT_RUN = 0,
     DECODE_SUCCESS, /* Operation succeeded; inspect candidate_valid for a result. */
-    DECODE_TRUNCATED, /* Budget exhausted; candidate_valid may be false. */
+    DECODE_TRUNCATED, /* Candidate/resource cap; candidate_valid may be false. */
     DECODE_NOT_IMPLEMENTED,
     DECODE_INVALID_ARGUMENT,
     DECODE_DIMENSION_MISMATCH,
@@ -22,7 +22,8 @@ typedef enum {
     DECODE_STOP_NONE = 0,
     DECODE_STOP_BOUND, //早停：未访问候选的部分代价下界不小于当前最佳完整代价
     DECODE_STOP_EXHAUSTED, //搜索空间耗尽，当前候选代价等于最优代价
-    DECODE_STOP_BUDGET //搜索空间未耗尽，但候选数达到预算限制
+    DECODE_STOP_BUDGET, //搜索空间未耗尽，但候选数达到预算限制
+    DECODE_STOP_RESOURCE //LC-GCD 的 Trellis/SLVA 资源预算不足，未证明最优
 } DecodeStopReason;
 
 /*
@@ -40,7 +41,7 @@ typedef struct {
     const double *weights;
     const BitVector *s_target;
     const BitVector *z_hint;
-    /* Required by GCD: borrowed offline S03 form built from this same H.
+    /* Required by GCD/LC-GCD: borrowed offline S03 form built from this same H.
      * H/form remain unchanged; no per-frame Gaussian elimination. */
     const BinarySystematic *systematic;
 } DecodeInput;
@@ -48,7 +49,11 @@ typedef struct {
 typedef struct {
     const char *decoder_name;
     uint64_t candidate_limit; /* Complete candidate evaluations; 0=unlimited. */
-    FILE *trace; /* Optional borrowed writable stream; NULL disables GCD trace. */
+    FILE *trace; /* Optional borrowed writable stream; NULL disables search trace. */
+    size_t delta; /* LC-GCD only: 0 <= delta <= rank(H); default 0. */
+    /* LC-GCD resource caps; zero selects defaults: 4096 states,
+     * 65536 live SLVA candidates, 64 MiB SLVA allocation payload. */
+    size_t state_limit, slva_max_candidates, slva_max_bytes;
 } DecodeConfig;
 
 
@@ -60,8 +65,8 @@ typedef struct {
     uint64_t batches;
 } DecoderStats;
 
-/*Read estimate/cost only when candidate_valid. optimality_proven requires a
- * future decoder's proof; check_candidate always leaves it false. */
+/*Read estimate/cost only when candidate_valid. GCD/LC-GCD set optimality_proven
+ * only on a bound/exhaustion proof; check_candidate always leaves it false. */
 typedef struct {
     DecodeStatus status;
     BitVector estimate; //is v in CLASSICAL, e_hat otherwise
@@ -75,7 +80,7 @@ typedef struct {
 /*
  * CLASSICAL: reference=z, s_res=H*z^T. Other modes: reference=z_hint (explicit
  * or derived from BP llr), s_res=s_target XOR H*reference^T.
- * The future common search kernel receives s_res and nonnegative flip_weights,
+ * The common search kernel receives s_res and nonnegative flip_weights,
  * finds H*f^T=s_res and minimizes W(f), without inspecting the mode/reference.
  * S03 checks redundant-row consistency separately. Do not use outputs on error. */
 DecodeStatus decode_prepare(const DecodeInput *input, BitVector *reference,BitVector *s_res, double *flip_weights);

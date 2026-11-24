@@ -27,9 +27,9 @@ function(check_cli expected_code expected_stream expected_text)
         set(other_text "${stdout}")
     endif()
     string(FIND "${actual_text}" "${expected_text}" match_position)
-    if(match_position EQUAL -1 OR NOT "${other_text}" STREQUAL "")
+    if(match_position EQUAL -1 OR (expected_stream STREQUAL "stdout" AND NOT "${other_text}" STREQUAL ""))
         message(FATAL_ERROR
-            "Arguments [${ARGN}]: expected '${expected_text}' on ${expected_stream} only\n"
+            "Arguments [${ARGN}]: expected '${expected_text}' on ${expected_stream}\n"
             "stdout: ${stdout}\nstderr: ${stderr}")
     endif()
     set(last_stdout "${stdout}" PARENT_SCOPE)
@@ -38,6 +38,11 @@ function(check_cli expected_code expected_stream expected_text)
 endfunction()
 
 function(check_text text expected)
+    # Trace records may have additional user debug output between them.
+    if(expected MATCHES "^trace ")
+        string(REGEX MATCHALL "trace [^\n]*\n" records "${text}")
+        string(JOIN "" text ${records})
+    endif()
     string(FIND "${text}" "${expected}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR "Missing '${expected}' in:\n${text}")
@@ -53,7 +58,7 @@ check_text("${last_stdout}" "rank=2 path(stage)=010001 cost=10")
 check_text("${last_stdout}" "rank=3 path(stage)=010100 cost=12")
 check_cli(2 stderr "USAGE_ERROR:" --demo-slva extra)
 check_cli(2 stderr "USAGE_ERROR:" --decoder gcd)
-foreach(decoder IN ITEMS lcgcd bp nms bp-lcgcd bp-osd)
+foreach(decoder IN ITEMS bp nms bp-lcgcd bp-osd)
     check_cli(3 stderr "NOT_IMPLEMENTED: decoder '${decoder}'" --decoder "${decoder}")
 endforeach()
 check_cli(2 stderr "USAGE_ERROR: unknown decoder" --decoder unknown)
@@ -98,6 +103,15 @@ check_cli(5 stdout "estimate=0000000 cost=17" ${frame} --llr "${llr}" --limit 1)
 check_cli(0 stdout "optimality_proven=1 stop_reason=bound" ${frame} --llr "${llr}" --limit 5)
 check_cli(0 stdout "estimate_type=error estimate=0100100 cost=5"
     ${frame} --mode syndrome --syndrome 111 --weights "${weights}")
+check_cli(0 stdout "optimality_proven=1" --decoder lcgcd --matrix "${h}" --delta 1
+    --mode syndrome --syndrome 111 --weights "${weights}" --trace)
+check_text("${last_stdout}" "estimate_type=error estimate=0100100 cost=5")
+check_text("${last_stdout}" "trace local delta=1")
+check_cli(0 stdout "optimality_proven=1" --decoder lcgcd --matrix "${h}" --delta 3 --llr "${llr}" --limit 1)
+check_text("${last_stdout}" "estimate_type=codeword estimate=1010100 cost=5")
+check_cli(4 stderr "DECODE_ERROR: DIMENSION_MISMATCH" --decoder lcgcd --matrix "${h}" --delta 4 --llr "${llr}")
+check_cli(2 stderr "USAGE_ERROR:" --decoder lcgcd --matrix "${h}" --delta -1 --llr "${llr}")
+check_cli(2 stderr "USAGE_ERROR:" ${frame} --delta 1 --llr "${llr}")
 check_cli(0 stdout "estimate_type=error estimate=1010100 cost=5"
     ${frame} --mode syndrome --syndrome 000 --hint 1110000 --weights "${weights}")
 check_cli(0 stdout "estimate_type=error estimate=1010100 cost=5"

@@ -2,23 +2,24 @@
 
 本项目按 [逐节点开发规范](BP_LCGCD_Codex_Stepwise_Prompt_v2.md) 开发，参考源码审计见 [S00 报告](docs/source_audit.md)。每个节点完成后等待人工审查，下一节点需要明确授权。所有项目改动保留在本地，由用户自行决定 Git 暂存、提交和推送。
 
-## 当前范围：S13
+## 当前范围：S14
 
-当前提供 GF(2) 运算、离线系统化、有序 TEP 生成器、三种输入场景共用的单帧 GCD，以及单帧 CLI/trace。`gcd` 已接入真实译码；其他五种算法仍明确返回 `NOT_IMPLEMENTED`，不静默替代。
+当前提供 GF(2) 运算、离线系统化、有序 TEP/SLVA 生成器，以及三种输入场景共用的单帧 GCD/LC-GCD 和 CLI/trace。`gcd`、`lcgcd` 已接入真实译码；其他四种算法仍明确返回 `NOT_IMPLEMENTED`，不静默替代。
 
 S08 提供 BPSK/AWGN/LLR 与可重放的单帧噪声；S09 增加单个 Eb/N0 点、有帧数/错误帧数上限的单线程 GCD 仿真和 CSV 摘要。CLI 既可接收指定软信息，也可用 `--simulate` 运行短仿真；尚未实现 SNR 扫描、绘图或其他译码算法。
 
-S10 增加局部约束准备：按每帧翻转权重从固定基列 I 选择 A，拆分 P 与变换后的 syndrome。仅提供 C API 和独立测试，尚未接入 LC-GCD 搜索或新增 CLI 模式。
+S10 按每帧翻转权重从固定基列 I 选择 A，拆分 P 与变换后的 syndrome；S14 已将它接入 LC-GCD 搜索。
 
-S11 提供 `[I_delta|P_A]` 的隐式 syndrome Trellis、分支转移与代价、固定起终点及状态数上限。S12 提供单条最优 Viterbi 路径与完整前缀表；S13 已加入按需拉取、无重复、代价非递减的 SLVA 局部路径列表，仍只提供 C API，完整 LC-GCD 留待 S14。
+S11 提供 `[I_delta|P_A]` 的隐式 syndrome Trellis，S12 提供单条最优 Viterbi 路径与完整前缀表，S13 提供 SLVA 局部路径列表；S14 补齐 Ac、比较完整翻转代价并用下界证明早停。
 
 ```text
 用户命令
   → main(argc, argv)
     → 无参数、--help 或 -h：print_help → stdout，退出码 0
     → --decoder gcd + --simulate：加载 H → 一次系统化 → 有上限帧循环 → CSV
-    → --decoder gcd + 单帧参数：加载 H → 离线系统化 → decoder_decode
-      → 原 GCD 内核：可选 trace → 最佳结果、证明标志、停止原因和计数
+    → --decoder gcd/lcgcd + 单帧参数：加载 H → 离线系统化 → decoder_decode
+      → 共用搜索流程（TEP 或 SLVA）：最佳结果、证明标志、停止原因和计数
+    → --demo-slva：固定样例 → S10/S11/S12/S13 → 全部局部路径
     → 其他已知译码器：NOT_IMPLEMENTED → stderr，退出码 3
     → 其他参数组合：USAGE_ERROR → stderr，退出码 2
 ```
@@ -225,7 +226,7 @@ S07 单帧入口使用 `--decoder gcd --matrix PATH`，默认 `--mode classical`
 | 无参数、`--help` 或 `-h` | 标准输出：帮助信息 | `0` |
 | `gcd` 帧输入，已证明最优 | 标准输出：结果、代价、证明标志、停止原因及计数；可选 trace | `0` |
 | `gcd` 候选预算耗尽、尚未获证明 | 标准输出：当前最佳，`TRUNCATED`、`optimality_proven=0` | `5` |
-| 其他五种已知译码器 | 标准错误：`NOT_IMPLEMENTED` | `3` |
+| 其他四种已知译码器 | 标准错误：`NOT_IMPLEMENTED` | `3` |
 | 未知译码器、缺少名称、未知参数或多余参数 | 标准错误：`USAGE_ERROR` | `2` |
 | 矩阵文件读取/格式/分配失败，或译码错误（含不一致 syndrome） | 标准错误：`INPUT_ERROR` / `DECODE_ERROR` | `4` |
 
@@ -525,7 +526,7 @@ ctest --test-dir build/wsl-debug -R '^viterbi$' --output-on-failure -V
 
 ## S13：SLVA 逐条有序局部路径
 
-固定样例调试入口为 `build/wsl-debug/bp_lcgcd --demo-slva`。参数集中在 `src/apps/main.c` 的 `run_slva_demo()`，从原始 H 系统化开始，依次调用 S10、S11、S13（初始化内部调用 S12），打印全部 16 条局部路径。完整 H、权重、syndrome、U/D、列映射和局部矩阵见[算法笔记 6.8](docs/trellis_slva_notes.md#68-固定样例参数与-main-调试入口)。这是独立的教学入口，`--decoder lcgcd` 仍返回 NOT_IMPLEMENTED。
+固定样例调试入口为 `build/wsl-debug/bp_lcgcd --demo-slva`。参数集中在 `src/apps/main.c` 的 `run_slva_demo()`，从原始 H 系统化开始，依次调用 S10、S11、S13（初始化内部调用 S12），打印全部 16 条局部路径。完整 H、权重、syndrome、U/D、列映射和局部矩阵见[算法笔记 6.8](docs/trellis_slva_notes.md#68-固定样例参数与-main-调试入口)。S14 的 `--decoder lcgcd` 单帧入口则会补齐完整候选并判断早停。
 
 新增 [slva.h](include/bplcgcd/slva.h) / [slva.c](src/search/slva.c)，以 S12 最佳前缀表和二叉最小堆实现串行列表。重新核对 1994 论文 §2.3–2.4，采用“最后不同分支 + 固定后缀分组”的等价 k-shortest 方法；[笔记第 6 节](docs/trellis_slva_notes.md#6-s13按最后不同分支划分的串行列表) 说明与原文最后合并、候选栈思想的对应、实现差别及完整证明。
 
@@ -561,11 +562,40 @@ ctest --test-dir build/wsl-debug -R '^slva$' --output-on-failure -V
 
 新测试通过 61,378 项检查、153 个小图的独立 Eq.9 全列表 oracle，包括零/相等权重、普通小数及大动态范围、平行边、所有 delta 边界、K=0/L=0、非零目标、peek/重放/前缀、资源限制及耗尽状态。另核对 70 位 delta=0 图的前 25 条与 TEP 代价一致。ASan/UBSan 含泄漏检查通过，执行命令记录在算法笔记 6.7。
 
+## S14：完整 LC-GCD 与早停
+
+`decoder_decode` 的 gcd/lcgcd 分支复用同一个准备、恢复和最佳候选流程。LC-GCD 使用 S10 和 S13，返回局部路径后通过 Eq.10 得到 `f_I[Ac]=s_Ac XOR P_Ac*f_P`，按 `W=W_local+W_Ac` 评分。每条完整翻转在原始坐标校验 `H*f=s_res`，返回 estimate 再校验零/目标 syndrome；三种输入模式保持统一翻转代价。
+
+新增 `DecodeConfig.delta`，默认 0，范围为 0..rank(H)。LC-GCD 的 state_limit/slva_max_candidates/slva_max_bytes 为 0 时分别使用 4096 状态、65536 活候选、64 MiB SLVA 有效载荷。资源不足返回 TRUNCATED / stop_reason=RESOURCE，保留已有最佳并撤销最优性证明；若初始化即超限，则 candidate_valid=false。这些字段只限制 Trellis/SLVA，口径见[算法笔记第 7 节](docs/trellis_slva_notes.md#7-s14完整-lc-gcdac-补齐与最优性证明)。
+
+下列命令在 WSL 中实际运行；样例文件位于忽略的 build 目录，内容为 `2 4` 后接两行 `1 0 1 0`、`0 1 0 1`：
+
+```bash
+cat > build/wsl-debug/s14-hand-H.txt <<'EOF'
+2 4
+1 0 1 0
+0 1 0 1
+EOF
+build/wsl-debug/bp_lcgcd --decoder lcgcd --matrix build/wsl-debug/s14-hand-H.txt \
+  --mode syndrome --syndrome 11 --weights '10 10 1 1' --delta 1 --trace
+```
+
+关键 trace 为：
+
+```text
+trace candidate=1 f_A/P(stage)=010 W_local=1 f_I(sys)=01 W=11 best=11 improved=1
+trace candidate=2 f_A/P(stage)=011 W_local=2 f_I(sys)=00 W=2 best=2 improved=1
+trace stop=bound last_W_local=2 >= best=2
+estimate_type=error estimate=0011 cost=2
+```
+
+limit=1 时保留第一条代价 11，返回 TRUNCATED/BUDGET；limit=2 已有下界证明，返回 SUCCESS。delta=m 时首条的局部代价就是完整代价，直接证明，只调用一次 Viterbi，不为早停生成第二条。相同代价保留首个找到的候选。`--simulate` 仍只支持 GCD；S15 的系统验证和 S16 的同帧比较等待后续授权。
+
 ## 检查内容与代码位置
 
-`CMakeLists.txt` 注册十三个 CTest 测试；S13 新增 `slva` 的 61,378 项检查、153 个穷举图。原 `viterbi` 有 2461 项检查、60 个图，`trellis` 有 8022 项检查、39 个图，`local_constraints` 有 4049 项检查、82 组划分，`simulation` 有 493 项检查，`simulation_cli` 有 8 个场景，`channel` 有 105 项检查，`cli_smoke` 有 45 个场景（含固定 SLVA demo）；`gf2` 有 1,598 项检查；`systematic` 有 119,601 项检查；`decoder` 保留三种场景共用翻转代价的回归；`tep` 有 109,279 项检查、55 个场景；`gcd` 与独立全空间最小代价 oracle 核对 402 帧。
+`CMakeLists.txt` 注册十四个 CTest 测试；S14 新增 `lcgcd` 的 520 项检查、12 个固定 ML oracle 帧。原 `slva` 有 61,378 项检查、153 个穷举图，`viterbi` 有 2461 项检查、60 个图，`trellis` 有 8022 项检查、39 个图，`local_constraints` 有 4049 项检查、82 组划分，`simulation` 有 493 项检查，`simulation_cli` 有 8 个场景，`channel` 有 105 项检查，`cli_smoke` 有 49 个场景；`gf2` 有 1,598 项检查；`systematic` 有 119,601 项检查；`decoder` 保留三种场景共用翻转代价的回归；`tep` 有 109,279 项检查、55 个场景；`gcd` 与独立全空间最小代价 oracle 核对 402 帧。
 
-进入 S13 时的实际基线为 12/12 通过；本轮 WSL 配置、构建及 CTest 为 13/13 通过，ASan/UBSan 运行 SLVA 测试无报告。本节点仅新增 SLVA 模块/测试、注册构建并更新说明；已有用户代码和注释保持原样。
+进入 S14 时的实际基线为 12/13，cli_smoke 的连续 trace 文本检查被用户堆打印打断。本轮保留打印，改为提取 trace 后核对顺序，并允许错误场景同时打印 stdout 调试信息；仍检查状态码、错误内容及成功场景无 stderr。WSL CTest 为 14/14 通过，ASan/UBSan 含泄漏检查运行 LC-GCD 集成测试无报告。
 
 TEP 测试覆盖乱序权重、全零、全相同权重、固定种子随机二进制小数、普通小数及大动态范围，检查顺序、精确 tie-break、空模式、无重复、完整性、输出位序、输入不变和结束状态。测试 oracle 枚举全部子集后 qsort，不调用生产 FPT/最小堆代码。
 
@@ -575,12 +605,12 @@ GCD oracle 在原始列坐标枚举全部 2^N 个翻转模式，直接计算 syn
 
 优先阅读：
 
-1. `src/search/slva.c` 的 `expand_pending`：固定后缀分组、最佳前缀回溯、保留全局候选和失败处理。
-2. `include/bplcgcd/slva.h`：逐条接口、路径位序、三类预算和输入生命周期。
-3. `tests/slva_test.c` 的 `verify`：独立 Eq.9 全列表 oracle，以及稳定重放/预算/完整性证据。
+1. `src/decoders/decoder.c` 的 `gcd_decode`：共用流程中 SLVA 路径的 Ac 补齐、完整代价和下界判断。
+2. `tests/lcgcd_test.c`：独立完整翻转 oracle、11→2 手算例及预算/资源证明状态。
+3. `docs/trellis_slva_notes.md` 第 7 节：Algorithm 1 对应关系、初始化差别和早停依据。
 
 本节点新增源码独立编写；参考矩阵只在忽略的 build 目录转换验证，未作为项目数据分发。搜索正确性的依据是补齐映射和非负代价下界；小码 oracle 为实现提供回归证据。本轮没有进行大码吞吐实验或内存分配失败故障注入。
 
 ## 节点状态
 
-S00—S12 已通过节点推进验收；S13 SLVA 逐条有序局部路径已实现，等待人工验收。下一候选节点是 S14：补齐 Ac、完整 LC-GCD 候选与早停；收到明确授权后才执行。
+S00—S13 已通过节点推进验收；S14 完整 LC-GCD 与早停已实现，等待人工验收。下一候选节点是 S15：系统小码对照与 delta 边界验证；收到明确授权后才执行。

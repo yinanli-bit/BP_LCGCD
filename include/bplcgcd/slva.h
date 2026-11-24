@@ -38,6 +38,7 @@ typedef struct {
     SlvaLimits limits; //用户设置的候选数量、内存和输出路径数量限制
     size_t bytes_used; //当前 SLVA 模块管理的内存占用量
     uint64_t paths_returned, next_sequence; //已经通过 slva_next() 输出的路径数量，为新候选分配的顺序号
+    uint64_t nodes_expanded; /* Output groups successfully split into children. */
 } SlvaGenerator;
 
 

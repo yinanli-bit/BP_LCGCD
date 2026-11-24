@@ -226,7 +226,7 @@ int main(void)
         set_bits(&pattern, 2);
         CHECK(decode_check_candidate(&input, flip_weights, &pattern, &result, &scratch) == DECODE_SUCCESS);
         result.stats.candidates_evaluated = 4;
-        DecodeStatus expected = i == 0 ? DECODE_INVALID_ARGUMENT : DECODE_NOT_IMPLEMENTED; /* GCD needs S03 form. */
+        DecodeStatus expected = i < 2 ? DECODE_INVALID_ARGUMENT : DECODE_NOT_IMPLEMENTED; /* GCD/LC-GCD need S03 form. */
         CHECK(decoder_decode(&config, &input, &result) == expected);
         CHECK(result.status == expected && !result.candidate_valid && !result.optimality_proven);
         CHECK(result.stats.candidates_evaluated == 0 && result.estimate.data == buffer);

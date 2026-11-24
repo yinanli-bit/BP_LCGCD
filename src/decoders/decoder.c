@@ -1,5 +1,6 @@
 #include "bplcgcd/decoder.h"
 #include "bplcgcd/tep.h"
+#include "bplcgcd/slva.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -163,33 +164,72 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
         form->row_transform.rows != rows || form->row_transform.cols != rows || m > n || m > rows) {
         return result->status = DECODE_DIMENSION_MISMATCH;
     }
-    size_t k = n - m;
+    bool lc = strcmp(config->decoder_name, "lcgcd") == 0;
+    size_t k = n - m, delta = lc ? config->delta : 0;
+    if (delta > m) return result->status = DECODE_DIMENSION_MISMATCH;
+    if (lc && ((m && k > SIZE_MAX/m) || n > SIZE_MAX/sizeof(size_t)))
+        return result->status = DECODE_ALLOCATION_FAILED;
+    size_t stages = lc ? delta+k : k;
     BitVector reference = {0}, residual = {0}, transformed = {0}, system = {0};
-    BitVector partial = {0}, original = {0}, scratch = {0};
-    BitVector *buffers[] = {&reference, &residual, &transformed, &system, &partial, &original, &scratch};
-    const size_t lengths[] = {n, rows, rows, n, k, n, rows};
+    BitVector partial = {0}, original = {0}, scratch = {0}, local_rhs = {0};
+    BitVector *buffers[] = {&reference, &residual, &transformed, &system, &partial, &original, &scratch, &local_rhs};
+    const size_t lengths[] = {n, rows, rows, n, stages, n, rows, lc ? m : 0};
     TepGenerator generator = {0};
+    SlvaGenerator list = {0};
+    SyndromeTrellis trellis = {.length=stages};
+    LocalConstraints local = {0};
+    uint8_t *local_p = NULL;
     TepStatus tep_status = TEP_OK;
+    SlvaStatus slva_status = SLVA_OK;
     DecodeStatus status = DECODE_ALLOCATION_FAILED;
     double *weights = malloc(n * sizeof(double));
-    double *partial_weights = k ? malloc(k * sizeof(double)) : NULL;
-    if (!weights || (k && !partial_weights)) goto finish;
+    double *partial_weights = !lc && k ? malloc(k * sizeof(double)) : NULL;
+    if (!weights || (!lc && k && !partial_weights)) goto finish;
     for (size_t i = 0; i < sizeof(buffers) / sizeof(*buffers); ++i) {
         if (lengths[i] && bit_vector_init(buffers[i], lengths[i]) != GF2_OK) goto finish;
     }
     status = decode_prepare(input, &reference, &residual, weights);
     if (status != DECODE_SUCCESS) goto finish;
-    Gf2Status gf2_status = binary_systematic_transform_syndrome(form, &residual, &transformed);
+    Gf2Status gf2_status;
+    if (lc) {
+        /* The two P blocks and right-hand sides are views into owned buffers. */
+        local_p = m && k ? malloc(m*k) : NULL;
+        local.basis_order = m ? malloc(m*sizeof(size_t)) : NULL;
+        trellis.column_masks = stages ? malloc(stages*sizeof(size_t)) : NULL;
+        trellis.original_columns = stages ? malloc(stages*sizeof(size_t)) : NULL;
+        if ((m && k && !local_p) || (m && !local.basis_order) ||
+            (stages && (!trellis.column_masks || !trellis.original_columns))) {
+            status = DECODE_ALLOCATION_FAILED;
+            goto finish;
+        }
+        local.p_a = (BinaryMatrix){delta,k,local_p};
+        local.p_ac = (BinaryMatrix){m-delta,k,local_p ? local_p+delta*k : NULL};
+        local.s_a = (BitVector){delta,local_rhs.data};
+        local.s_ac = (BitVector){m-delta,local_rhs.data ? local_rhs.data+delta : NULL};
+        gf2_status = local_constraints_prepare(form, weights, n, &residual, delta, &local, &transformed);
+    } else gf2_status = binary_systematic_transform_syndrome(form, &residual, &transformed);
     if (gf2_status != GF2_OK) {
         status = gf2_status == GF2_INCONSISTENT_SYNDROME ?
                  DECODE_INCONSISTENT_SYNDROME : DECODE_INVALID_ARGUMENT;
         goto finish;
     }
-    for (size_t j = 0; j < k; ++j) partial_weights[j] = weights[form->sys_to_orig[m + j]];
-    tep_status = tep_generator_init(&generator, partial_weights, k);
-    
-
-    if (tep_status != TEP_OK) goto tep_error;
+    if (lc) {
+        TrellisStatus graph_status = syndrome_trellis_prepare(form, &local, weights, n,
+            config->state_limit ? config->state_limit : 4096, &trellis);
+        if (graph_status != TRELLIS_OK) {
+            slva_status = graph_status == TRELLIS_RESOURCE_LIMIT ? SLVA_RESOURCE_LIMIT :
+                          graph_status == TRELLIS_NUMERIC_ERROR ? SLVA_NUMERIC_ERROR : SLVA_INVALID_ARGUMENT;
+            goto slva_error;
+        }
+        SlvaLimits limits = {.max_candidates=config->slva_max_candidates ? config->slva_max_candidates : 65536,
+            .max_bytes=config->slva_max_bytes ? config->slva_max_bytes : 64*1024*1024};
+        slva_status = slva_init(&list, &trellis, &limits);
+        if (slva_status != SLVA_OK) goto slva_error;
+    } else {
+        for (size_t j = 0; j < k; ++j) partial_weights[j] = weights[form->sys_to_orig[m+j]];
+        tep_status = tep_generator_init(&generator, partial_weights, k);
+        if (tep_status != TEP_OK) goto tep_error;
+    }
     FILE *trace = config->trace;
     if (trace) {
         fprintf(trace, "trace N=%zu rank=%zu K=%zu sys_to_orig=", n, m, k);
@@ -205,41 +245,78 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
             trace_bits(trace, "", form->reduced.data + i * n, n);
             fputc('\n', trace);
         }
+        if (lc) {
+            fprintf(trace, "trace local delta=%zu A(original)=", delta);
+            for (size_t i = 0; i < delta; ++i) fprintf(trace, "%s%zu", i ? "," : "", local.basis_order[i]);
+            trace_bits(trace, " s_A=", local.s_a.data, delta);
+            fputc('\n', trace);
+        }
     }
+    double partial_cost = 0;
     for (;;) {
+        /* All unseen local paths cost >= the last returned one. In particular
+         * delta=m needs only Viterbi-1, with no SLVA expansion for a proof. */
+        if (lc && result->candidate_valid && partial_cost >= result->cost) {
+            result->optimality_proven = true;
+            result->stop_reason = DECODE_STOP_BOUND;
+            status = DECODE_SUCCESS;
+            if (trace) fprintf(trace, "trace stop=bound last_W_local=%.17g >= best=%.17g\n", partial_cost, result->cost);
+            break;
+        }
         double lower_bound;
-        tep_status = tep_generator_peek(&generator, &lower_bound);
-        if (tep_status == TEP_DONE) {
+        if (lc) {
+            slva_status = slva_peek(&list, &lower_bound);
+            if (slva_status != SLVA_OK && slva_status != SLVA_DONE) goto slva_error;
+        } else {
+            tep_status = tep_generator_peek(&generator, &lower_bound);
+            if (tep_status != TEP_OK && tep_status != TEP_DONE) goto tep_error;
+        }
+        if (lc ? slva_status == SLVA_DONE : tep_status == TEP_DONE) {
             result->optimality_proven = true;
             result->stop_reason = DECODE_STOP_EXHAUSTED;
             status = DECODE_SUCCESS;
-            if (trace) fputs("trace stop=exhausted (no remaining f_P)\n", trace);
+            if (trace) fprintf(trace, "trace stop=exhausted (no remaining %s)\n", lc ? "local paths" : "f_P");
             break;
         }
-        if (tep_status != TEP_OK) goto tep_error;
         if (result->candidate_valid && lower_bound >= result->cost) {
             result->optimality_proven = true;
             result->stop_reason = DECODE_STOP_BOUND;
             status = DECODE_SUCCESS;
-            if (trace) fprintf(trace, "trace stop=bound next_W_P=%.17g >= best=%.17g\n", lower_bound, result->cost);
+            if (trace) fprintf(trace, "trace stop=bound %s=%.17g >= best=%.17g\n",
+                               lc ? "next_W_local" : "next_W_P", lower_bound, result->cost);
             break;
         }
         if (config->candidate_limit && result->stats.candidates_evaluated >= config->candidate_limit) {
             decode_result_mark_truncated(result);
             status = DECODE_TRUNCATED;
             if (trace) fprintf(trace, "trace stop=budget evaluated=%" PRIu64 " limit=%" PRIu64
-                               " next_W_P=%.17g < best=%.17g\n", result->stats.candidates_evaluated,
-                               config->candidate_limit, lower_bound, result->cost);
+                               " %s=%.17g < best=%.17g\n", result->stats.candidates_evaluated,
+                               config->candidate_limit, lc ? "next_W_local" : "next_W_P", lower_bound, result->cost);
             break;
         }
         double cost;
-        tep_status = tep_generator_next(&generator, &partial, &cost);
-        if (tep_status != TEP_OK) goto tep_error;
-        double partial_cost = cost;
+        if (lc) {
+            slva_status = slva_next(&list, &partial, &cost);
+            if (slva_status != SLVA_OK) goto slva_error;
+        } else {
+            tep_status = tep_generator_next(&generator, &partial, &cost);
+            if (tep_status != TEP_OK) goto tep_error;
+        }
+        partial_cost = cost;
         ++result->stats.candidates_popped;
         memset(system.data, 0, m);
-        if (k) memcpy(system.data + m, partial.data, k);
-        if (m) {
+        if (k) memcpy(system.data + m, partial.data + (lc ? delta : 0), k);
+        if (lc) {
+            for (size_t i = 0; i < delta; ++i)
+                system.data[form->orig_to_sys[local.basis_order[i]]] = partial.data[i];
+            BitVector free_bits = {k,system.data+m}, product = {m-delta,scratch.data};
+            if (m > delta && k && binary_matrix_multiply_vector(&local.p_ac, &free_bits, &product) != GF2_OK) {
+                status = DECODE_INVALID_ARGUMENT;
+                goto finish;
+            }
+            for (size_t i = 0; i < m-delta; ++i)
+                system.data[form->orig_to_sys[local.basis_order[delta+i]]] = local.s_ac.data[i] ^ (k ? scratch.data[i] : 0);
+        } else if (m) {
             /* H_sys * (0,f_P)^T = P*f_P^T; views reuse S03 storage/scratch. */
             BinaryMatrix h_sys = {m, n, form->reduced.data};
             BitVector basis_syndrome = {m, scratch.data};
@@ -249,16 +326,28 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
             }
             for (size_t i = 0; i < m; ++i) system.data[i] = transformed.data[i] ^ scratch.data[i];
         }
-        /* W = W_P + W_I, with only nonnegative additions: W_P remains a valid
-         * floating-point lower bound. This is the same flip objective W(f). */
-        for (size_t i = 0; i < m; ++i) {
-            if (system.data[i]) cost += weights[form->sys_to_orig[i]];
+        /* GCD: W_P+W_I; LC-GCD: W_local+W_Ac. Append nonnegative terms to
+         * the enumerator's score, preserving its floating-point lower bound. */
+        for (size_t i = lc ? delta : 0; i < m; ++i) {
+            size_t original_column = lc ? local.basis_order[i] : form->sys_to_orig[i];
+            if (system.data[form->orig_to_sys[original_column]]) cost += weights[original_column];
         }
         if (!isfinite(cost)) { status = DECODE_NUMERIC_ERROR; goto finish; }
+        if (lc) {
+            if (binary_systematic_to_original(form, &system, &original) != GF2_OK ||
+                binary_matrix_multiply_vector(input->h, &original, &scratch) != GF2_OK) {
+                status = DECODE_INVALID_ARGUMENT;
+                goto finish;
+            }
+            for (size_t i = 0; i < rows; ++i) if (scratch.data[i] != residual.data[i]) {
+                status = DECODE_INVALID_CANDIDATE;
+                goto finish;
+            }
+        }
         ++result->stats.candidates_evaluated;
         bool improved = !result->candidate_valid || cost < result->cost;
         if (improved) {
-            if (binary_systematic_to_original(form, &system, &original) != GF2_OK) {
+            if (!lc && binary_systematic_to_original(form, &system, &original) != GF2_OK) {
                 status = DECODE_INVALID_ARGUMENT;
                 goto finish;
             }
@@ -268,18 +357,27 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
         }
         if (trace) {
             fprintf(trace, "trace candidate=%" PRIu64, result->stats.candidates_evaluated);
-            trace_bits(trace, " f_P(sys)=", partial.data, k);
-            fprintf(trace, " W_P=%.17g", partial_cost);
+            trace_bits(trace, lc ? " f_A/P(stage)=" : " f_P(sys)=", partial.data, stages);
+            fprintf(trace, " %s=%.17g", lc ? "W_local" : "W_P", partial_cost);
             trace_bits(trace, " f_I(sys)=", system.data, m);
             fprintf(trace, " W=%.17g best=%.17g improved=%d\n", cost, result->cost, (int)improved);
         }
     }
     goto finish;
+slva_error:
+    if (slva_status == SLVA_RESOURCE_LIMIT || slva_status == SLVA_PATH_LIMIT) {
+        decode_result_mark_truncated(result);
+        result->stop_reason = DECODE_STOP_RESOURCE;
+        status = DECODE_TRUNCATED;
+        if (config->trace) fputs("trace stop=resource (Trellis/SLVA cap; no optimality proof)\n", config->trace);
+    } else status = slva_status == SLVA_ALLOCATION_FAILED ? DECODE_ALLOCATION_FAILED :
+                    slva_status == SLVA_NUMERIC_ERROR ? DECODE_NUMERIC_ERROR : DECODE_INVALID_ARGUMENT;
+    goto finish;
 tep_error:
     status = tep_status == TEP_ALLOCATION_FAILED ? DECODE_ALLOCATION_FAILED :
              tep_status == TEP_NUMERIC_ERROR ? DECODE_NUMERIC_ERROR : DECODE_INVALID_ARGUMENT;
 finish:
-    result->stats.nodes_expanded = generator.nodes_expanded;
+    result->stats.nodes_expanded = lc ? list.nodes_expanded : generator.nodes_expanded;
     if (result->candidate_valid) {
         /* Verify the returned best estimate against the ORIGINAL H/target. */
         int valid = binary_matrix_multiply_vector(input->h, &result->estimate, &scratch) == GF2_OK;
@@ -294,6 +392,11 @@ finish:
         }
     }
     tep_generator_free(&generator);
+    slva_free(&list);
+    free(local_p);
+    free(local.basis_order);
+    free(trellis.column_masks);
+    free(trellis.original_columns);
     for (size_t i = 0; i < sizeof(buffers) / sizeof(*buffers); ++i) bit_vector_free(buffers[i]);
     free(weights);
     free(partial_weights);
@@ -317,7 +420,8 @@ DecodeStatus decoder_decode(const DecodeConfig *config, const DecodeInput *input
     if (!result) return DECODE_INVALID_ARGUMENT;
     decode_result_reset(result);
     if (!config || !decoder_is_known(config->decoder_name)) return result->status = DECODE_INVALID_ARGUMENT;
-    if (strcmp(config->decoder_name, "gcd") == 0) return gcd_decode(config, input, result);
+    if (strcmp(config->decoder_name, "gcd") == 0 || strcmp(config->decoder_name, "lcgcd") == 0)
+        return gcd_decode(config, input, result);
     DecodeStatus status = validate_input(input);
     if (status != DECODE_SUCCESS) return result->status = status;
     if (!result->estimate.data) {
