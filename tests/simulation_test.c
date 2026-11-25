@@ -71,10 +71,53 @@ static void csv_text(const DecodeConfig *decoder, const SimulationConfig *config
     CHECK(!ferror(stream) && feof(stream));
     buffer[count] = '\0';
     CHECK(fclose(stream) == 0);
+    /* CPU time is measured, so only this field is excluded from replay text. */
+    const char *runtime=strstr(buffer,"runtime_seconds");
+    CHECK(runtime);
+    size_t column=0;
+    for (const char *p=buffer; p<runtime; ++p)
+        column+=*p==',';
+    char *value=strchr(buffer,'\n')+1;
+    for (size_t i=0; i<column; ++i)
+        value=strchr(value,',')+1;
+    char *end=strchr(value,',');
+    CHECK(end);
+    memmove(value,end,strlen(end)+1);
+}
+
+static void check_search_counters(void)
+{
+    uint8_t data[]={1,0,1,0, 0,1,0,1}, target_data[]={1,1}, estimate[4];
+    double weights[]={10,10,1,1};
+    BinaryMatrix h={2,4,data};
+    BinarySystematic form={0};
+    BitVector target={2,target_data};
+    CHECK(binary_matrix_systematize(&h,&form)==GF2_OK);
+    DecodeInput input={.mode=DECODE_SYNDROME,.h=&h,.length=4,.weights=weights,.s_target=&target,.systematic=&form};
+    DecodeResult result={.estimate={4,estimate}};
+    DecodeConfig decoder={.decoder_name="gcd",.candidate_limit=1};
+    CHECK(decoder_decode(&decoder,&input,&result)==DECODE_TRUNCATED);
+    CHECK(result.stats.partial_patterns_generated==2 && result.stats.candidates_evaluated==1);
+    CHECK(!result.stats.trellis_states_visited && !result.stats.batches);
+    decoder.decoder_name="lcgcd";
+    decoder.delta=1;
+    CHECK(decoder_decode(&decoder,&input,&result)==DECODE_TRUNCATED);
+    CHECK(result.stats.partial_patterns_generated==3 && result.stats.candidates_evaluated==1);
+    CHECK(result.stats.trellis_states_visited==5 && result.stop_reason==DECODE_STOP_BUDGET);
+    decoder.candidate_limit=2;
+    CHECK(decoder_decode(&decoder,&input,&result)==DECODE_SUCCESS);
+    CHECK(result.stats.partial_patterns_generated==3 && result.stats.candidates_evaluated==2);
+    CHECK(result.stop_reason==DECODE_STOP_BOUND && result.optimality_proven);
+    decoder.delta=2;
+    decoder.candidate_limit=1;
+    CHECK(decoder_decode(&decoder,&input,&result)==DECODE_SUCCESS);
+    CHECK(result.stats.partial_patterns_generated==1 && result.stats.trellis_states_visited==11);
+    binary_systematic_free(&form);
 }
 
 int main(void)
 {
+    check_search_counters();
     /* Self-authored Hamming [7,4], fourth row redundant: R uses rank, not rows. */
     uint8_t entries[] = {1,0,0,1,1,0,1, 0,1,0,1,0,1,1,
                          0,0,1,0,1,1,1, 1,1,0,0,1,1,0};
@@ -109,23 +152,36 @@ int main(void)
     CHECK(repeat.totals.nodes_expanded == 100 && repeat.totals.batches == 0);
 
     /* Known aggregate: enforce CODEWORD denominator, actual frames and averages. */
+    decoder.candidate_limit=0;
     SimulationResult fixture = {.n=8, .k=4, .sigma2=1, .frames=10, .frame_errors=2,
         .bit_errors=4, .hd_bit_errors=8, .proven_frames=10,
-        .totals={.candidates_popped=30, .candidates_evaluated=30, .nodes_expanded=15}};
+        .early_stop_counts={[DECODE_STOP_BOUND]=10}, .p50_queries=1, .p95_queries=15, .p99_queries=15,
+        .totals={.candidates_popped=30, .candidates_evaluated=30, .nodes_expanded=21,.partial_patterns_generated=42}};
     csv_text(&decoder, &config, &fixture, a, sizeof(a));
     char *row = strchr(a, '\n');
     CHECK(row != NULL);
     char *field = strtok(row + 1, ",\n");
     size_t columns = 0;
     while (field) {
-        if (columns == 13) CHECK(strtod(field, NULL) == 0.05);
-        if (columns == 14) CHECK(strtod(field, NULL) == 0.2);
-        if (columns == 15) CHECK(strtod(field, NULL) == 0.1);
-        if (columns == 20) CHECK(strtod(field, NULL) == 3);
+        if (columns == 17) CHECK(strtod(field, NULL) == 0.05);
+        if (columns == 16) CHECK(strtod(field, NULL) == 0.2);
+        if (columns == 18) CHECK(strtod(field, NULL) == 0.1);
+        if (columns == 25) CHECK(strtod(field, NULL) == 3);
         ++columns;
         field = strtok(NULL, ",\n");
     }
-    CHECK(columns == 24);
+    CHECK(columns == 39); /* Empty normalized timing field is skipped by strtok. */
+    CHECK(first.runtime_available && isfinite(first.runtime_seconds) && first.runtime_seconds>=0);
+    CHECK(first.p50_queries>=1 && first.p50_queries<=first.p95_queries && first.p95_queries<=first.p99_queries);
+    CHECK(first.totals.partial_patterns_generated>=first.totals.candidates_popped && !first.totals.trellis_states_visited);
+    CHECK(repeat.early_stop_counts[DECODE_STOP_BUDGET]==repeat.truncated_frames);
+    FILE *json=tmpfile();
+    CHECK(json && simulation_write_json(json,&decoder,&config,&fixture));
+    rewind(json);
+    size_t json_count=fread(a,1,sizeof(a)-1,json);
+    a[json_count]=0;
+    CHECK(strstr(a,"\"runtime_seconds\":null"));
+    CHECK(fclose(json)==0);
     CHECK(!simulation_write_csv(NULL, &decoder, &config, &first));
     config.max_frames = 0;
     CHECK(simulation_run(&h, &form, &decoder, &config, &repeat) == DECODE_INVALID_ARGUMENT);

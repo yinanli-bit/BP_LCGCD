@@ -20,7 +20,7 @@ typedef struct {
     const double *flip_weights;
 } SyndromeTrellis;
 
-//复用配对的 S03/S10 输出；weights 是原始坐标翻转权重，图使用期间保持不变
+//准备column_masks、original_columns、state_count、target等信息
 TrellisStatus syndrome_trellis_prepare(const BinarySystematic *form, const LocalConstraints *local,
                                       const double *flip_weights, size_t length, size_t state_limit,
                                       SyndromeTrellis *result);

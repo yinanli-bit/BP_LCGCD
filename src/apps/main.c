@@ -19,7 +19,9 @@ static void print_help(void)
          "       bp_lcgcd --demo-slva\n"
          "       bp_lcgcd --decoder gcd|lcgcd --matrix H.txt [--mode MODE] INPUT [OPTIONS]\n"
          "       bp_lcgcd --decoder gcd --matrix H.txt --simulate --ebn0 DB\n"
-         "         --frames N --errors N --csv PATH [--seed N] [--limit N]\n"
+         "         --frames N --errors N (--csv PATH | --json PATH) [--seed N] [--limit N]\n"
+         "       bp_lcgcd --decoder lcgcd --matrix H.txt --compare --delta N\n"
+         "         --ebn0 DB --frames N --errors N (--csv PATH | --json PATH) [--seed N] [--limit N] [--trace]\n"
          "\n"
          "Modes and INPUT (default: classical):\n"
          "  classical     --llr \"L0 L1 ...\"\n"
@@ -38,13 +40,15 @@ static void print_help(void)
          "  --syndrome BITS  Contiguous bits in original H row order.\n"
          "  --hint BITS      Contiguous reference bits in original column order (default zero).\n"
          "  --limit N        Complete candidate budget; 0=unlimited (default).\n"
-         "  --trace          Print preparation, every evaluated candidate and stop condition.\n"
+         "  --trace          Search trace; with --compare, paired samples and frame results.\n"
          "  --simulate       GCD only: all-zero classical BPSK/AWGN at one Eb/N0 point.\n"
+         "  --compare        Paired GCD/LC-GCD; shared frames, noise and candidate budget.\n"
          "  --ebn0 DB        Finite Eb/N0 in dB for simulation.\n"
          "  --frames N       Positive simulation frame cap.\n"
          "  --errors N       Positive decoded frame-error cap.\n"
          "  --seed N         Simulation seed (default 12344567).\n"
-         "  --csv PATH       Write CSV header + summary; codeword BER uses N bits.\n"
+         "  --csv PATH       Write schema v1 CSV; BER uses all N codeword bits.\n"
+         "  --json PATH      Write versioned JSON run records; CSV/JSON may be combined.\n"
          "\n"
          "Decoder input/output bits use original order, index 0 first. Trace f_I/f_P use\n"
          "systematic order and print the zero-based sys_to_orig mapping.\n"
@@ -156,17 +160,18 @@ int main(int argc, char *argv[])
     if (argc == 2 && !strcmp(argv[1], "--demo-slva")) return run_slva_demo();
     const char *decoder = NULL, *matrix_path = NULL, *mode = NULL, *llr_text = NULL;
     const char *weights_text = NULL, *syndrome_text = NULL, *hint_text = NULL, *limit_text = NULL, *delta_text = NULL;
-    const char *ebn0_text = NULL, *frames_text = NULL, *errors_text = NULL, *seed_text = NULL, *csv_path = NULL;
+    const char *ebn0_text = NULL, *frames_text = NULL, *errors_text = NULL, *seed_text = NULL, *csv_path = NULL, *json_path = NULL;
     const struct { const char *name; const char **value; } options[] = {
         {"--decoder", &decoder}, {"--matrix", &matrix_path}, {"--mode", &mode},
         {"--llr", &llr_text}, {"--weights", &weights_text}, {"--syndrome", &syndrome_text},
         {"--hint", &hint_text}, {"--limit", &limit_text}, {"--delta", &delta_text}, {"--ebn0", &ebn0_text},
-        {"--frames", &frames_text}, {"--errors", &errors_text}, {"--seed", &seed_text}, {"--csv", &csv_path}
+        {"--frames", &frames_text}, {"--errors", &errors_text}, {"--seed", &seed_text}, {"--csv", &csv_path}, {"--json", &json_path}
     };
-    bool trace = false, simulate = false;
+    bool trace = false, simulate = false, compare = false;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--trace") && !trace) { trace = true; continue; }
         if (!strcmp(argv[i], "--simulate") && !simulate) { simulate = true; continue; }
+        if (!strcmp(argv[i], "--compare") && !compare) { compare = true; continue; }
         const char **slot = NULL;
         for (size_t j = 0; j < sizeof(options) / sizeof(*options); ++j) {
             if (!strcmp(argv[i], options[j].name)) { slot = options[j].value; break; }
@@ -193,17 +198,18 @@ int main(int argc, char *argv[])
     else if (!strcmp(mode, "bp-syndrome")) input.mode = DECODE_BP_SYNDROME;
     else { fputs("USAGE_ERROR: unknown mode. Use --help.\n", stderr); return CLI_USAGE_ERROR; }
     bool valid_options;
-    if (simulate) valid_options = !lc && input.mode == DECODE_CLASSICAL && !llr_text && !weights_text &&
-                                 !syndrome_text && !hint_text && ebn0_text && frames_text && errors_text && csv_path;
+    if (simulate || compare) valid_options = !(simulate && compare) && (compare ? lc : !lc) && input.mode == DECODE_CLASSICAL && !llr_text && !weights_text &&
+                                 !syndrome_text && !hint_text && ebn0_text && frames_text && errors_text && (csv_path || json_path);
     else if (input.mode == DECODE_CLASSICAL) valid_options = llr_text && !weights_text && !syndrome_text && !hint_text;
     else if (input.mode == DECODE_SYNDROME) valid_options = syndrome_text && weights_text && !llr_text;
     else valid_options = syndrome_text && llr_text && !weights_text && !hint_text;
     if (!matrix_path || !valid_options || (!lc && delta_text) ||
-        (!simulate && (ebn0_text || frames_text || errors_text || seed_text || csv_path))) {
+        (!simulate && !compare && (ebn0_text || frames_text || errors_text || seed_text || csv_path || json_path)) ||
+        (csv_path && json_path && !strcmp(csv_path,json_path))) {
         fputs("USAGE_ERROR: missing matrix/input or incompatible mode options. Use --help.\n", stderr);
         return CLI_USAGE_ERROR;
     }
-    DecodeConfig config = {.decoder_name=decoder, .trace=trace ? stdout : NULL};
+    DecodeConfig config = {.decoder_name=decoder, .trace=trace && !compare ? stdout : NULL};
     uint64_t delta = 0;
     if (delta_text && (!parse_count(delta_text, &delta) || delta > SIZE_MAX)) {
         fputs("USAGE_ERROR: --delta requires a nonnegative integer.\n", stderr);
@@ -215,7 +221,7 @@ int main(int argc, char *argv[])
         return CLI_USAGE_ERROR;
     }
     SimulationConfig sim = {.seed=12344567};
-    if (simulate && (!parse_soft(ebn0_text, &sim.ebn0_db, 1, false) ||
+    if ((simulate || compare) && (!parse_soft(ebn0_text, &sim.ebn0_db, 1, false) ||
         !parse_count(frames_text, &sim.max_frames) || !sim.max_frames ||
         !parse_count(errors_text, &sim.max_frame_errors) || !sim.max_frame_errors ||
         (seed_text && !parse_count(seed_text, &sim.seed)))) {
@@ -234,26 +240,49 @@ int main(int argc, char *argv[])
     Gf2Status loaded = binary_matrix_load(stream, &h);
     fclose(stream);
     if (loaded != GF2_OK) { fputs("INPUT_ERROR: cannot load matrix (format, I/O or allocation).\n", stderr); goto cleanup; }
-    if (simulate) {
+    if (simulate || compare) {
         if (binary_matrix_systematize(&h, &form) != GF2_OK) {
             fputs("INPUT_ERROR: offline systematization failed.\n", stderr);
             goto cleanup;
         }
-        SimulationResult summary = {0};
-        DecodeStatus status = simulation_run(&h, &form, &config, &sim, &summary);
+        SimulationResult summary[2] = {0};
+        DecodeStatus status = compare ? simulation_compare(&h,&form,&config,&sim,summary,trace ? stdout : NULL) :
+                                       simulation_run(&h,&form,&config,&sim,&summary[0]);
         if (status != DECODE_SUCCESS) {
             fprintf(stderr, "DECODE_ERROR: simulation %s\n", status_name(status));
             goto cleanup;
         }
-        FILE *csv = fopen(csv_path, "w");
-        if (!csv) { fprintf(stderr, "INPUT_ERROR: cannot open CSV '%s'.\n", csv_path); goto cleanup; }
-        int written = simulation_write_csv(csv, &config, &sim, &summary);
-        if (fclose(csv) != 0) written = 0;
-        if (!written) { fputs("IO_ERROR: cannot write CSV summary.\n", stderr); goto cleanup; }
-        printf("simulation frames=%" PRIu64 " frame_errors=%" PRIu64 " truncated_frames=%" PRIu64
-               " stop_reason=%s csv=%s\n", summary.frames, summary.frame_errors, summary.truncated_frames,
-               summary.error_limit_hit ? "error_limit" : "frame_limit", csv_path);
-        exit_code = summary.truncated_frames ? CLI_TRUNCATED : CLI_OK;
+        for (size_t format=0; format<2; ++format) {
+            const char *path=format ? json_path : csv_path;
+            if (!path)
+                continue;
+            FILE *output=fopen(path,"w");
+            if (!output) {
+                fprintf(stderr,"INPUT_ERROR: cannot open output '%s'.\n",path);
+                goto cleanup;
+            }
+            int written;
+            if (format)
+                written=compare ? simulation_compare_write_json(output,&config,&sim,summary) :
+                                  simulation_write_json(output,&config,&sim,&summary[0]);
+            else
+                written=compare ? simulation_compare_write_csv(output,&config,&sim,summary) :
+                                  simulation_write_csv(output,&config,&sim,&summary[0]);
+            if (fclose(output)!=0)
+                written=0;
+            if (!written) {
+                fputs("IO_ERROR: cannot write simulation summary.\n",stderr);
+                goto cleanup;
+            }
+        }
+        exit_code = CLI_OK;
+        for (size_t d=0; d<(compare ? 2u : 1u); ++d) {
+            if (compare) printf("comparison decoder=%s delta=%zu ",d ? "lcgcd" : "gcd",d ? config.delta : 0);
+            printf("simulation frames=%" PRIu64 " frame_errors=%" PRIu64 " truncated_frames=%" PRIu64
+               " stop_reason=%s csv=%s json=%s\n", summary[d].frames, summary[d].frame_errors, summary[d].truncated_frames,
+               summary[d].error_limit_hit ? "error_limit" : "frame_limit", csv_path ? csv_path : "-", json_path ? json_path : "-");
+            if (summary[d].truncated_frames) exit_code = CLI_TRUNCATED;
+        }
         goto cleanup;
     }
     if (h.cols > SIZE_MAX / sizeof(*soft)) goto allocation_error;
@@ -296,6 +325,10 @@ int main(int argc, char *argv[])
     printf("candidates_popped=%" PRIu64 " candidates_evaluated=%" PRIu64
            " nodes_expanded=%" PRIu64 " batches=%" PRIu64 "\n", result.stats.candidates_popped,
            result.stats.candidates_evaluated, result.stats.nodes_expanded, result.stats.batches);
+    printf("partial_patterns_generated=%" PRIu64 " full_candidates_evaluated=%" PRIu64
+           " query_batches=%" PRIu64 " trellis_states_visited=%" PRIu64 " early_stop_reason=%s query_limit_hit=%d\n",
+           result.stats.partial_patterns_generated,result.stats.candidates_evaluated,result.stats.batches,
+           result.stats.trellis_states_visited,stops[result.stop_reason],result.stop_reason==DECODE_STOP_BUDGET);
     exit_code = status == DECODE_TRUNCATED ? CLI_TRUNCATED : CLI_OK;
     goto cleanup;
 allocation_error:

@@ -1,6 +1,6 @@
 # Trellis 与 List Viterbi：原文核对及本项目约定
 
-本记录覆盖 S11 图模型、S12 单条最优 Viterbi、S13 逐条有序列表及 S14 完整 LC-GCD。第 1–4 节保留原文对应关系，第 5–6 节记录 Viterbi/SLVA，第 7 节记录 Ac 补齐、完整代价与早停。
+本记录覆盖 S11–S17。第 1–4 节保留原文对应关系，第 5–6 节记录 Viterbi/SLVA，第 7 节记录完整 LC-GCD，第 8 节记录系统验证和精度边界，第 9 节记录同帧比较，第 10 节记录正式统计口径。
 
 ## 1. 实际阅读的来源
 
@@ -321,7 +321,7 @@ W(f) = W_local + sum_(i in Ac) f_i*flip_weights_i
 
 Ac 的行序与 S10 的 basis_order 后缀一致。K=0 时乘积为零；Ac 为空时没有追加项。每个完成候选均回到原始列坐标，验证 `H*f^T=s_res`，然后严格比较完整 W，只在更小时保存 `reference XOR f`。最后再次用原始 H 校验返回 estimate：Classical 目标为零，其余模式为 s_target。不会把最终 estimate 的非负错误权重当作翻转代价。
 
-完整代价从 SLVA 返回值开始，按 Ac 顺序只追加非负项，保证每个候选的 `W>=W_local`；避免重新按不同顺序求和导致浮点下界关系倒转。当前采用 double 的严格比较，无 epsilon；小码 ML 断言使用可精确表示的整数/二进制小数。广泛的小数、随机矩阵及跨算法对照留待 S15/S16。
+完整代价从 SLVA 返回值开始，按 Ac 顺序只追加非负项，保证每个候选的 `W>=W_local`；避免重新按不同顺序求和导致浮点下界关系倒转。当前采用 double 的严格比较，无 epsilon。S15 的严格 oracle 和极端动态范围限制见第 8 节；S16 的同帧仿真比较尚未开展。
 
 ### 7.3 早停与截断
 
@@ -373,4 +373,209 @@ gcc -std=c11 -g -O1 -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
   src/search/local_constraints.c src/search/tep.c src/core/gf2.c src/core/systematic.c \
   -lm -o build/wsl-debug/lcgcd_test_sanitized
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/wsl-debug/lcgcd_test_sanitized
+```
+
+## 8. S15：系统验证、delta=0 回归及数值边界
+
+### 8.1 独立 oracle 与覆盖范围
+
+新增 `tests/lcgcd_oracle_test.c`，只从原始 H 和原始坐标翻转 f 枚举全部 `2^N` 模式，直接计算 `H*(reference XOR f)` 及权重和。oracle 不调用生产 GF(2)、系统化、局部约束、TEP、SLVA 或候选补齐代码。秩另由原始 H 的像空间大小独立核对。每组输入检查所有 delta=0..m；候选上限依次为 1、2、全部 `2^K`、不限，重复数值跳过。
+
+严格组使用整数/四分之一权重，测试规模内可被 double 精确求和，比较容差为零。分别测试 Classical、纯 Syndrome、带 hint 的 Syndrome 和 BP 后验输入；有证明时必须等于独立 ML 最小值，预算截断时必须保持原始 syndrome、最佳代价随预算不增、证明为 false。delta=m 要求一条完整候选即可成功；m=0 按 delta=0 退化处理。并列最小值允许不同 delta 选不同解，同一配置重放必须逐位、逐状态及计数相同。
+
+覆盖 64 个全部二进制 2×3 矩阵的四个 syndrome、固定种子 20261124 的 N=1..10 随机矩阵及配对列置换、附加 XOR 冗余行和零行、故意不一致 syndrome、K=0 恒等矩阵、带冗余行的自构 Hamming [7,4]、零/相同/乱序权重。检查 H、权重、LLR、目标/hint、系统化矩阵、行变换及双向列映射均未被修改。
+
+### 8.2 实际发现并修复：delta=0 有限预算不等价
+
+```text
+H = 1 0 1 1       weights=(10,10,1,1), reference=0000
+    0 1 0 1       target syndrome=10, candidate_limit=2
+```
+
+修复前实际 CLI 证据：
+
+| 算法 | 第 2 个 f_P | 返回原始 estimate | 代价 | 结果 |
+| --- | --- | --- | --- | --- |
+| GCD | `10` | `0010` | 1 | SUCCESS，证明最优，退出 0 |
+| LC-GCD(delta=0) | `01` | `1000` | 10 | TRUNCATED/BUDGET，退出 5 |
+
+无局部约束时两个枚举器遍历同一集合，但 TEP 与 SLVA 的等代价顺序不同，有限预算下会影响返回值。这与 delta=0 精确退化为 GCD 的约定不符。新增测试在 fixture=1、delta=0、limit=2 首先报告状态不一致；修复前的断言日志和 CLI trace 保存在 build/wsl-debug 的 `s15-oracle-before.log`、`s15-delta0-*-before.log`。
+
+唯一的生产逻辑修复是：共用内核仅在名称为 lcgcd 且 delta>0 时使用局部约束/SLVA；delta=0 直接走原 TEP 分支。因而包括并列解、停止原因和候选/扩展计数在内均与 GCD 一致，delta=0 不使用 SLVA 资源上限。S13 的独立单状态 SLVA 仍保留，不修改其并列规则。测试实际核对了 4780 组 delta=0/GCD 结果。
+
+### 8.3 数值诊断：通过误差界不等于严格 ML
+
+四组普通小数/大动态范围探针单独标记，使用 long double 参考（本轮 WSL 的 LDBL_MANT_DIG=64）。记正数和的尺度为 max(|a|,|b|)，诊断容差为 `4*(N+1)*DBL_EPSILON*scale`；该容差仅用于数值探针，生产比较和严格 oracle 仍无 epsilon。除检查此界外，单独累计返回解与较高精度 ML 不同的次数。
+
+实测 164 个数值探针中，104 个报告代价与 long double 原始顺序求和不同，16 个已返回 SUCCESS 的解在较高精度下并非最轻。最大代价偏差约 0.200195312，最大较高精度 ML 超额约 0.100585938，相对超额约 1.00585937e-17；不是 16 个严格 ML 通过样例。long double 本身也有舍入，这些数值为该参考下的测量。
+
+可复现的反例：
+
+```text
+H = 1 0 0        weights=(1e16,0.2,0.1), reference=000, s_target=11
+    0 1 1
+GCD 和 LC-GCD(delta=2) 实际返回 f=110，double 报告 cost=1e16。
+另一合法 f=101，按输入 double 值的精确有理数权重和更轻约 0.1。
+```
+
+在 1e16 附近 double 的相邻值间隔为 2，追加 0.1 或 0.2 均可能不改变累计值，比较因此成为并列。用 Python Fraction 对实际 CLI 输出独立核对，精确超额为 `3602879701896397/36028797018963968`。这说明当前 optimality_proven 针对实现的浮点评分，不能推广成任意动态范围下精确实数总分的 ML 保证。此次记录边界，没有引入跨模块高精度评分重构，也未开展大量性能实验。反例日志为 `build/wsl-debug/s15-numeric-*.log` 及 `s15-numeric-evidence.txt`。
+
+### 8.4 实际结果与复现命令
+
+| 项目 | 本轮实际结果 |
+| --- | --- |
+| WSL 环境 | Ubuntu 24.04.4、GCC 13.3.0、CMake/CTest 3.28.3 |
+| 严格组 | 12852 个 LC 配置：10936 个证明最优、518 个正确预算截断、1398 个正确不一致 syndrome，无严格断言失败 |
+| delta 分类 | delta=0：4780；delta=m>0：4680；中间值：3556，包含数值探针 |
+| 并列重放 | 1574 组逐位/状态/计数相同 |
+| 总规模 | 353 个 H/目标组合，13016 个 LC 配置，19370 次译码调用，323442 项检查 |
+| 数值组 | 164 个按声明误差界检查；16 个较高精度 ML 差异单独记录 |
+| 工程回归 | CTest 15/15；ASan/UBSan 含泄漏检查无报告 |
+
+新测试仅在传入日志路径时重定向它自己的 stdout，每次译码截断重写该文件，保留最近调用的用户调试输出，避免 CTest 保存大量重复打印。摘要和失败参数写 stderr；失败会打印 H、软值、模式、delta、预算、目标、hint 和固定种子。生产打印及注释保持原样。
+
+```bash
+cmake -S . -B build/wsl-debug -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=/usr/bin/gcc -DBUILD_TESTING=ON
+cmake --build build/wsl-debug --clean-first -j 4
+ctest --test-dir build/wsl-debug -R '^lcgcd_oracle$' --output-on-failure -V
+ctest --test-dir build/wsl-debug --output-on-failure
+gcc -std=c11 -g -O1 -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
+  -fno-omit-frame-pointer -Iinclude tests/lcgcd_oracle_test.c src/decoders/decoder.c \
+  src/search/slva.c src/search/viterbi.c src/search/trellis.c src/search/local_constraints.c \
+  src/search/tep.c src/core/gf2.c src/core/systematic.c -lm -o build/wsl-debug/lcgcd_oracle_sanitized
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  build/wsl-debug/lcgcd_oracle_sanitized build/wsl-debug/lcgcd_oracle_sanitized_debug.log
+```
+
+一次增量构建因 WSL 产物时间戳超前而跳过重新链接，仍执行旧二进制；采用 clean-first 重编译后复核通过。未修改系统时钟或源文件时间戳。既有 systematic.c 调试格式/有符号比较警告仍保留。
+
+## 9. S16：单线程同帧公平比较
+
+### 9.1 共享输入和预算
+
+新增 `simulation_compare(h, form, lc_config, config, results, paired_trace)`。直接复用两个 SimulationResult，results[0] 为 GCD，results[1] 为 LC-GCD。lc_config 的 candidate_limit 同时用于两算法，delta/SLVA 资源设置用于 LC-GCD。输入 H、配对的离线系统化结果以及 Eb/N0、seed、帧上限均只提供一份，不为两算法分别预处理 H。
+
+共用的单线程 run_frames 每帧只调用一次 bpsk_awgn_transmit 和 bpsk_compute_llr，发送同一个全零码字；两算法借用同一个 y/LLR 缓冲和同一个 H/form。采用 S08 的现有 RNG，样本由 `(seed, Eb/N0, frame_index)` 决定，R=(N-rank(H))/N、sigma2 均共用。帧号从 0 开始，只有两算法都完成当前帧并返回有效候选才递增。资源不足且没有候选时返回错误，双方都不累计这一个未完成配对帧。
+
+完整候选评估是预算单位；SLVA peek/前缀构造不计为完整候选。popped/evaluated/expanded/batches 沿用现有定义，未添加 S17 的分位数、运行时间或新统计系统。delta=0 继续直接走 GCD/TEP，保证并列顺序、逐帧输出、证明/停止状态及计数一致。新调度和 trace 代码独立编写，复用已有信道/译码模块。
+
+### 9.2 共同停止和输出
+
+每帧两边都完成后，再累计各自 FER/码字 BER、证明/截断帧数及 DecoderStats。达到 max_frames，或者任一方达到 max_frame_errors，整个配对运行一起停止。因此两边统计使用同一帧集合；在配对结果中 error_limit_hit 表示共同运行因误帧上限停止，即使另一方尚未达到该上限也为 true。
+
+CLI 使用 `--decoder lcgcd --compare --delta N`；--compare 与 --simulate 互斥，前者要求 Classical 模式。--limit 为双方每帧相同的完整候选上限；任一方存在截断帧，CLI 返回 5，CSV 仍有效。单算法 --simulate 及其 24 列 CSV 保持原口径。配对 CSV 使用原有数值行格式，仅加 decoder、delta 两列，输出一个表头和两行，GCD 的 delta 记 0。
+
+--trace 输出 paired_config、每帧两条 paired_input 和两条 paired_result。input 的 tx 是发送比特，noise 定义为实际浮点接收值 y 减去 BPSK 符号 x；y/LLR/noise 用 `%a` 十六进制浮点打印，能往返还原 double，避免十进制截断掩盖差异。它记录的是实现的实际加性增量，而不是重新调用 RNG 生成的噪声。原有 printf 仍在 stdout，可按 `^paired_` 筛选。
+
+### 9.3 实际三帧和误帧上限样例
+
+本轮 WSL 中运行：
+
+```bash
+cat > build/wsl-debug/s16-h7.txt <<'EOF'
+3 7
+1 0 0 1 1 0 1
+0 1 0 1 0 1 1
+0 0 1 0 1 1 1
+EOF
+build/wsl-debug/bp_lcgcd --decoder lcgcd --matrix build/wsl-debug/s16-h7.txt \
+  --compare --delta 1 --ebn0 0 --frames 3 --errors 3 --seed 2026 \
+  --csv build/wsl-debug/s16-three-frames.csv --trace > build/wsl-debug/s16-three-frames.log
+rg '^paired_|^comparison ' build/wsl-debug/s16-three-frames.log
+```
+
+| frame_index | GCD 输出 / 完整候选数 | LC-GCD 输出 / 完整候选数 |
+| --- | --- | --- |
+| 0 | 0000000 / 1 | 0000000 / 1 |
+| 1 | 0000000 / 1 | 0000000 / 1 |
+| 2 | 0100101 / 7 | 0100101 / 3 |
+
+N=7、K=4、sigma2=0.875；每帧两条 input 的 tx/noise/y/LLR 完全一致。双方都是 3 帧、1 误帧、3 误比特；完整候选总数分别为 9 和 5。frame=2 虽两边一致且证明最优，但发送的是全零码字，所以它仍是误帧。三帧计数仅为功能演示，不据此给出性能提升结论。
+
+另实际运行相同 H/seed、Eb/N0=-3、delta=1、limit=1、frames=100、errors=2：两边均处理 3 帧，GCD 为 2 误帧/2 截断帧，LC-GCD 为 1 误帧/1 截断帧，双方共同 stop_reason=error_limit，CLI 退出 5。CSV/log 为 `build/wsl-debug/s16-shared-stop.csv`、`s16-shared-stop.log`。
+
+### 9.4 验证与边界
+
+WSL2 Ubuntu 24.04.4、GCC 13.3.0、CMake/CTest 3.28.3：simulation_pair 通过 9136 项检查，独立重放 99 对帧。分别核对输入 hex 浮点往返后的字节、共同停止时刻、直接译码重放的逐帧估计及汇总、独立原始 H 的欧氏距离 ML oracle。覆盖 delta=0..m、无限/单候选预算、CSV 与完整 trace 重放、原单算法兼容、非对称误帧上限、无有效候选时不部分计数。simulation_cli 增为 15 个场景；全项目 CTest 16/16，ASan/UBSan 含泄漏检查无报告。
+
+```bash
+cmake -S . -B build/wsl-debug -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=/usr/bin/gcc -DBUILD_TESTING=ON
+cmake --build build/wsl-debug -j 4
+ctest --test-dir build/wsl-debug -R '^simulation(_cli|_pair)?$' --output-on-failure -V
+ctest --test-dir build/wsl-debug --output-on-failure
+gcc -std=c11 -g -O1 -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
+  -fno-omit-frame-pointer -Iinclude tests/simulation_pair_test.c src/simulation/simulation.c \
+  src/channel/channel.c src/decoders/decoder.c src/search/slva.c src/search/viterbi.c \
+  src/search/trellis.c src/search/local_constraints.c src/search/tep.c src/core/gf2.c \
+  src/core/systematic.c -lm -o build/wsl-debug/simulation_pair_sanitized
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  build/wsl-debug/simulation_pair_sanitized build/wsl-debug/simulation_pair_sanitized_debug.log
+```
+
+没有开展 S17 的正式统计系统、SNR 扫描、多线程或大量性能实验；本次只使用全零发送。S15 的极端动态范围精度边界仍适用；固定 seed 的浮点逐字节重放限定于同一运行环境，不承诺跨数学库一致。
+
+## 10. S17：版本化统计、CSV/JSON 与测量范围
+
+### 10.1 字段来源及单位
+
+本轮复用 DecoderStats/SimulationResult，新增实际计数和汇总，不改变搜索顺序、评分或预算。S16 记录的 24/26 列未版本化 CSV 在本节点迁移为 schema_version=1，单算法和配对均使用同一份 40 列表头。JSON 是含 1/2 个记录的数组，字段名与 CSV 一一对应，整数按十进制 uint64_t 写出，query_limit_hit 为 JSON boolean / CSV 0 或 1。
+
+| 字段 | 口径与代码位置 |
+| --- | --- |
+| partial_patterns_generated | 成功提交给枚举队列的部分模式代表数，包含根。TEP 在 push 内逐次加一；SLVA 使用 next_sequence，即最轻合法根路径与已提交子组代表总数。分配失败时回滚的临时孩子不计入 |
+| full_candidates_evaluated | 现有 DecoderStats.candidates_evaluated；补齐完整 f、计算完整代价并通过必要校验后加一 |
+| patterns_popped / nodes_expanded | 现有弹出数及实际生成孩子的父节点数，分别报告，不称为完整评估数或批次数 |
+| query_batches | 现有 batches；当前算法串行，无批量查询操作，实际为 0 |
+| trellis_states_visited | 成功 Viterbi 初始化中，层 0..L-1 的有限前缀状态展开次数；从保留的 cells 中逐格计数。排除终点层、不可达格及 SLVA 回溯读表；GCD/delta=0 为实际的 0 |
+| avg_queries | full_candidates_evaluated / 实际计入 frames |
+| p50_queries / p95_queries / p99_queries | 每帧完整候选数的 nearest-rank 分位数：排序后取第 ceil(p*F) 项，不插值，F 为实际帧数 |
+| early_stop_reason | 整个记录只有一种逐帧停止原因时为该原因，否则为 mixed；与仿真循环停止原因区分 |
+| query_limit_hit / query_limit_hit_frames | 是否存在/多少帧真正因候选预算停止。不是“评估数等于上限”；达到上限同时获得证明时不计入 |
+| resource_limit_hit_frames | stop_reason=RESOURCE 的有效截断帧，与查询预算截断分别计数 |
+| stop_bound_frames / stop_exhausted_frames | 下界证明/穷尽证明的帧数 |
+| fer / ber / hd_ber | frame_errors/F、bit_errors/(F*N)、hd_bit_errors/(F*N)；BER 为整个码字比特口径 |
+| runtime_seconds / runtime_kind | 计入帧的 decoder_decode 调用进程 CPU 时间总和，秒；kind 固定为 process_cpu_decoder_calls |
+
+其余字段为算法名/delta、seed/Eb/N0、N/K/rate/sigma2、运行上限、实际帧数、误帧/比特数、证明/截断帧数和 run_stop_reason。后者为 frame_limit 或 error_limit，沿用 S16 的共同停止规则。单帧文本及 paired_stats 也报告正式搜索字段；旧文本的 candidates_evaluated 是 full_candidates_evaluated 的同一计数，没有维护两套评分或重复计数器。
+
+### 10.2 分位数、停止状态和缺失值
+
+每个算法内部临时分配 max_frames 个 uint64_t 保存逐帧完整候选数，完成运行后仅排序实际 F 项，写回三个标量并释放缓冲；配对运行分别计算。额外容量为每算法 `8*max_frames` 字节，不在输出结构中引入动态所有权。对配置导致的字节数溢出和分配失败保留必要检查；错误运行不作为完成记录导出。
+
+有效完成/截断帧满足：停止原因计数之和=frames，proven_frames=bound+exhausted，truncated_frames=budget+resource。生成数不小于弹出数，当前 GCD/LC-GCD 正常记录的弹出数等于完整评估数。批次数可以为 0，而完整候选数大于 0。Trellis 分配容量 `2^delta*(L+1)` 也不等于实际前向可达状态展开数。
+
+runtime 使用 C11 clock() 包围每次 decoder_decode，排除信道生成、离线 H 系统化、paired 输入/结果输出、分位数排序和 CSV/JSON 写出；包含每帧准备、分配、搜索、校验、统计取值以及译码函数内部的用户 printf。配对顺序为 GCD 后 LC-GCD。调试输出和缓存状态会影响结果，不能解释为 ASIC 延迟，也不据此声称吞吐提升。
+
+若任一次 clock() 不可用或发生回绕，该记录的 runtime_available=false，CSV 写 NA、JSON 写 null，避免把部分测量当作完整时间。零时间也可能是计时分辨率造成的有效测量。尚未测量的 FLOPs、硬件周期和量子逻辑错误率不出现在当前 schema 中，不填虚假的 0。调用方只在仿真返回 DECODE_SUCCESS 后导出完成记录，截断情况在帧级字段中保留。
+
+runtime 不要求重放一致；其他样本、查询统计和结果仍要求一致。测试只在文本重放比较时排除 runtime_seconds，另检查时间非负有限和格式互通。生产搜索仍使用严格 double 比较，S15 的极端动态范围限制未改变。
+
+### 10.3 实际样例与验证
+
+在 WSL 中运行同一三帧样例并同时导出两种格式：
+
+```bash
+./build/wsl-debug/bp_lcgcd --decoder lcgcd --matrix build/wsl-debug/s16-h7.txt \
+  --compare --delta 1 --ebn0 0 --frames 3 --errors 3 --seed 2026 \
+  --csv build/wsl-debug/s17-example.csv --json build/wsl-debug/s17-example.json
+```
+
+| 指标 | GCD | LC-GCD(delta=1) |
+| --- | --- | --- |
+| partial_patterns_generated | 18 | 11 |
+| full_candidates_evaluated | 9 | 5 |
+| query_batches / trellis_states_visited | 0 / 0 | 0 / 27 |
+| avg_queries | 3 | 5/3 |
+| p50 / p95 / p99 | 1 / 7 / 7 | 1 / 3 / 3 |
+| early_stop_reason / query_limit_hit | bound / false | bound / false |
+
+字段均来自同一次运行的结果；CSV/JSON 的 runtime 也一致，但重新运行的时间可以不同。--json 可单独使用，也可与 --csv 同时使用；两文件不可使用相同路径。JSON 做分组换行以便人工查看。实际运行只覆盖短样例，不是性能曲线复现。
+
+WSL2 Ubuntu 24.04.4、GCC 13.3.0、CMake/CTest 3.28.3：全项目 16/16 CTest 通过。simulation 有 518 项检查，包括手算生成数 2/3、Trellis 展开数 5/11、达到预算但已证明最优及缺失时间的 null。simulation_pair 有 10972 项检查、111 对独立重放帧，用经验 CDF 独立计算分位数，并覆盖资源截断原因。simulation_cli 为 19 个场景，逐字段核对 40 个 CSV/JSON 字段、停止计数及 schema，ASan/UBSan 含泄漏检查无报告。新改动生产源码通过 -Wall -Wextra -Wpedantic -Werror 语法检查；保留既有系统化调试警告和用户排版，未开展 S18 扫描。
+
+```bash
+cmake -S . -B build/wsl-debug -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=/usr/bin/gcc -DBUILD_TESTING=ON
+cmake --build build/wsl-debug -j 4
+ctest --test-dir build/wsl-debug -R '^simulation(_cli|_pair)?$' --output-on-failure -V
+ctest --test-dir build/wsl-debug --output-on-failure
 ```

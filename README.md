@@ -2,7 +2,7 @@
 
 本项目按 [逐节点开发规范](BP_LCGCD_Codex_Stepwise_Prompt_v2.md) 开发，参考源码审计见 [S00 报告](docs/source_audit.md)。每个节点完成后等待人工审查，下一节点需要明确授权。所有项目改动保留在本地，由用户自行决定 Git 暂存、提交和推送。
 
-## 当前范围：S14
+## 当前范围：S17
 
 当前提供 GF(2) 运算、离线系统化、有序 TEP/SLVA 生成器，以及三种输入场景共用的单帧 GCD/LC-GCD 和 CLI/trace。`gcd`、`lcgcd` 已接入真实译码；其他四种算法仍明确返回 `NOT_IMPLEMENTED`，不静默替代。
 
@@ -12,11 +12,18 @@ S10 按每帧翻转权重从固定基列 I 选择 A，拆分 P 与变换后的 s
 
 S11 提供 `[I_delta|P_A]` 的隐式 syndrome Trellis，S12 提供单条最优 Viterbi 路径与完整前缀表，S13 提供 SLVA 局部路径列表；S14 补齐 Ac、比较完整翻转代价并用下界证明早停。
 
+S15 增加系统小码独立 oracle，修复 delta=0 在相等权重和有限预算下与 GCD 不一致的问题，并单独记录极端动态范围的浮点 ML 差异。严格组通过；数值探针的容差内结果不作为精确实数 ML 保证。
+
+S16 增加单线程配对仿真：同一帧只生成一次全零码字的 AWGN/y/LLR，GCD 与 LC-GCD 共享输入及完整候选预算，输出逐帧 paired trace 和两行对照 CSV。
+
+S17 增加正式搜索计数、逐帧查询分位数和译码 CPU 时间，单算法/配对统一导出 schema v1 的 CSV/JSON。旧未版本化 CSV 已迁移，字段口径见[笔记第 10 节](docs/trellis_slva_notes.md#10-s17版本化统计csvjson-与测量范围)。
+
 ```text
 用户命令
   → main(argc, argv)
     → 无参数、--help 或 -h：print_help → stdout，退出码 0
     → --decoder gcd + --simulate：加载 H → 一次系统化 → 有上限帧循环 → CSV
+    → --decoder lcgcd + --compare：加载 H → 一次系统化 → 共享样本 → 两算法 → 配对 CSV
     → --decoder gcd/lcgcd + 单帧参数：加载 H → 离线系统化 → decoder_decode
       → 共用搜索流程（TEP 或 SLVA）：最佳结果、证明标志、停止原因和计数
     → --demo-slva：固定样例 → S10/S11/S12/S13 → 全部局部路径
@@ -566,7 +573,7 @@ ctest --test-dir build/wsl-debug -R '^slva$' --output-on-failure -V
 
 `decoder_decode` 的 gcd/lcgcd 分支复用同一个准备、恢复和最佳候选流程。LC-GCD 使用 S10 和 S13，返回局部路径后通过 Eq.10 得到 `f_I[Ac]=s_Ac XOR P_Ac*f_P`，按 `W=W_local+W_Ac` 评分。每条完整翻转在原始坐标校验 `H*f=s_res`，返回 estimate 再校验零/目标 syndrome；三种输入模式保持统一翻转代价。
 
-新增 `DecodeConfig.delta`，默认 0，范围为 0..rank(H)。LC-GCD 的 state_limit/slva_max_candidates/slva_max_bytes 为 0 时分别使用 4096 状态、65536 活候选、64 MiB SLVA 有效载荷。资源不足返回 TRUNCATED / stop_reason=RESOURCE，保留已有最佳并撤销最优性证明；若初始化即超限，则 candidate_valid=false。这些字段只限制 Trellis/SLVA，口径见[算法笔记第 7 节](docs/trellis_slva_notes.md#7-s14完整-lc-gcdac-补齐与最优性证明)。
+新增 `DecodeConfig.delta`，默认 0，范围为 0..rank(H)。S15 将 delta=0 直接退化为 GCD 的 TEP 分支。delta>0 时，LC-GCD 的 state_limit/slva_max_candidates/slva_max_bytes 为 0 分别使用 4096 状态、65536 活候选、64 MiB SLVA 有效载荷。资源不足返回 TRUNCATED / stop_reason=RESOURCE，保留已有最佳并撤销最优性证明；若初始化即超限，则 candidate_valid=false。这些字段只限制 Trellis/SLVA，口径见[算法笔记第 7 节](docs/trellis_slva_notes.md#7-s14完整-lc-gcdac-补齐与最优性证明)。
 
 下列命令在 WSL 中实际运行；样例文件位于忽略的 build 目录，内容为 `2 4` 后接两行 `1 0 1 0`、`0 1 0 1`：
 
@@ -589,13 +596,83 @@ trace stop=bound last_W_local=2 >= best=2
 estimate_type=error estimate=0011 cost=2
 ```
 
-limit=1 时保留第一条代价 11，返回 TRUNCATED/BUDGET；limit=2 已有下界证明，返回 SUCCESS。delta=m 时首条的局部代价就是完整代价，直接证明，只调用一次 Viterbi，不为早停生成第二条。相同代价保留首个找到的候选。`--simulate` 仍只支持 GCD；S15 的系统验证和 S16 的同帧比较等待后续授权。
+limit=1 时保留第一条代价 11，返回 TRUNCATED/BUDGET；limit=2 已有下界证明，返回 SUCCESS。delta=m>0 时首条的局部代价就是完整代价，直接证明，只调用一次 Viterbi，不为早停生成第二条。相同代价保留首个找到的候选。单算法 `--simulate` 支持 GCD，S16 使用独立的 `--compare` 同帧比较入口。
+
+## S15：系统小码验证与 delta 边界
+
+新增 [lcgcd_oracle_test.c](tests/lcgcd_oracle_test.c)，在原始坐标穷举所有 f，独立计算 syndrome、代价及像空间大小，不借用生产系统化、补齐或路径生成算法。覆盖全部 64 个 2×3 二进制 H 的每个 syndrome、固定种子随机 N=1..10、配对列置换、冗余/零行、三种模式、零/相同权重、K=0、Hamming [7,4]、全部 delta 和预算前缀。[算法笔记第 8 节](docs/trellis_slva_notes.md#8-s15系统验证delta0-回归及数值边界) 给出失败证据与误差口径。
+
+实际发现：权重 `(10,10,1,1)` 的固定例子，在预算 2 时 GCD 得到代价 1 并证明最优，原 delta=0 的 SLVA 分支只得到代价 10 并截断。原因是并列路径顺序不同。生产修复仅让 delta=0 复用原 GCD 分支；4780 组对照确认输出位串、代价、状态、停止原因和计数完全一致。
+
+| 验证组 | 实际结果 |
+| --- | --- |
+| 整数/四分之一权重，零容差 | 12852 组：10936 个 ML 证明、518 个预算截断、1398 个不一致 syndrome，严格断言全部通过 |
+| 相同配置的并列重放 | 1574 组逐位、状态及计数相同 |
+| 小数与动态范围诊断 | 164 组按明确误差界检查；104 个浮点评分差异、16 个较高精度 ML 差异，单独记录 |
+| 总规模 | 353 个 H/目标组合、13016 个 LC 配置、19370 次译码调用、323442 项检查 |
+
+数值反例中，`1e16` 的公共代价会吞掉 `0.1/0.2` 的追加量；GCD 和 LC-GCD 都可能把精确权重和不同的候选视为并列。当前 double 评分及 optimality_proven 不提供任意动态范围的精确实数 ML 保证。16 个此类差异没有计为严格 ML 通过，未进行高精度评分重构或大量性能实验。
+
+```bash
+ctest --test-dir build/wsl-debug -R '^lcgcd_oracle$' --output-on-failure -V
+```
+
+CTest 将新测试自己的调试输出写入 `build/wsl-debug/lcgcd_oracle_debug.log`，每次调用覆盖为最新一帧，避免积累大量打印；应用的调试输出保持原样。失败时打印完整 H、软值、模式、delta、预算、目标/hint 和种子。
+
+## S16：同帧 GCD/LC-GCD 比较
+
+`simulation_compare` 复用现有两个 SimulationResult。每帧只生成一份接收信号和 LLR，两算法借用同一个 H、离线系统化结果和样本，按相同 --limit 统计完整候选评估；只有两边都返回有效估计才计入该帧。达到 --frames 或任一方的 --errors 后共同停止，两行 CSV 使用相同帧集合。
+
+使用前文 Hamming [7,4] 样例，以下命令在 WSL 中实际执行（矩阵创建命令见[笔记 9.3](docs/trellis_slva_notes.md#93-实际三帧和误帧上限样例)）：
+
+```bash
+./build/wsl-debug/bp_lcgcd --decoder lcgcd --matrix build/wsl-debug/s16-h7.txt \
+  --compare --delta 1 --ebn0 0 --frames 3 --errors 3 --seed 2026 \
+  --csv build/wsl-debug/s16-three-frames.csv --trace > build/wsl-debug/s16-three-frames.log
+rg '^paired_|^comparison ' build/wsl-debug/s16-three-frames.log
+```
+
+paired_input 用十六进制浮点逐项展示发送比特、实际噪声增量、y 和 LLR；两种算法的输入相同。paired_result 展示估计、代价、证明/停止状态及现有计数。默认不加 --trace 时只输出摘要及原有调试信息。配对 CSV 在已有 24 个数值字段前增加 decoder、delta，共一个表头和两行；原 --simulate CSV 保持原样。
+
+三帧输出依次为 `0000000、0000000、0100101`，双方均为 1 误帧、3 误比特，完整候选总数为 GCD 9、LC-GCD 5。这是功能演示，末帧仍是译码错误，不代表论文性能结论。--delta 0 可严格对照位串、状态、停止原因和所有现有计数；S15 的数值精度限制继续适用。
+
+配对的 error_limit_hit/CSV error_limit 表示任一方触发的共同停止。实际以 --ebn0 -3 --limit 1 --frames 100 --errors 2 --seed 2026 运行，两边均 3 帧，误帧分别为 2 和 1，仍共同停止，CLI 返回 5。候选截断帧参与误码统计；若某算法未得到有效候选，运行返回错误，两边都不计入该未完成帧。
+
+```bash
+ctest --test-dir build/wsl-debug -R '^simulation(_cli|_pair)?$' --output-on-failure -V
+```
+
+新增 simulation_pair 测试通过 9136 项检查、99 对帧的独立重放；覆盖 delta=0..m、预算、hex 浮点字节一致、独立码字距离 oracle、共同停止、重放及 CSV。ASan/UBSan 含泄漏检查无报告；`simulation_cli` 为 15 个场景。未加入 S17 的新统计系统、SNR 扫描或多线程。
+
+## S17：正式统计与结果文件
+
+CSV 与 JSON 使用同一组 40 个字段，schema_version=1。CSV 为表头加一/两行，JSON 为含一/两个记录的数组；--csv 与 --json 可任选或同时使用，两者来自同一次运行。旧 24/26 列文件需要按新版表头读取。
+
+```bash
+./build/wsl-debug/bp_lcgcd --decoder lcgcd --matrix build/wsl-debug/s16-h7.txt \
+  --compare --delta 1 --ebn0 0 --frames 3 --errors 3 --seed 2026 \
+  --csv build/wsl-debug/s17-example.csv --json build/wsl-debug/s17-example.json
+```
+
+| 字段组 | 口径 |
+| --- | --- |
+| partial_patterns_generated | 成功提交的根/子模式代表数，包含尚未弹出的候选；不等于完整评估数 |
+| full_candidates_evaluated / query_batches | 完整候选代价计算数 / 实际批次数；当前串行批次数为 0 |
+| trellis_states_visited | Viterbi 层 0..L-1 的有限前缀状态展开数，GCD 为 0；不把表容量或回溯访问数混进来 |
+| avg/p50/p95/p99_queries | 每帧完整评估数；分位数用 nearest-rank，包含有效截断帧 |
+| early_stop_reason / query_limit_hit | 单一帧级原因或 mixed / 是否有真正因查询预算停止的帧，另报各原因帧数 |
+| fer / ber / hd_ber | 实际误帧率 / 整个码字 BER / 硬判决码字 BER |
+| runtime_seconds | 计入帧的 decoder_decode 进程 CPU 时间，包含内部调试打印；不是硬件延迟 |
+
+达到查询上限同时获得最优性证明时 query_limit_hit=false，资源截断另计。停止原因之和=frames；证明帧=bound+exhausted，截断帧=budget+resource。CPU 时间不参与重放一致性要求；无法取得时 CSV=NA、JSON=null，未测量的硬件指标不造数。临时查询数组为每算法 8*max_frames 字节，完成汇总后释放。
+
+三帧例中 GCD/LC-GCD 的生成数为 18/11、完整评估为 9/5、Trellis 展开为 0/27，p95 为 7/3。只是功能示例，S15 数值精度限制和 S16 同帧规则继续适用。新增代码沿用现有控制分支/循环换行习惯，保留用户注释及既有格式。
 
 ## 检查内容与代码位置
 
-`CMakeLists.txt` 注册十四个 CTest 测试；S14 新增 `lcgcd` 的 520 项检查、12 个固定 ML oracle 帧。原 `slva` 有 61,378 项检查、153 个穷举图，`viterbi` 有 2461 项检查、60 个图，`trellis` 有 8022 项检查、39 个图，`local_constraints` 有 4049 项检查、82 组划分，`simulation` 有 493 项检查，`simulation_cli` 有 8 个场景，`channel` 有 105 项检查，`cli_smoke` 有 49 个场景；`gf2` 有 1,598 项检查；`systematic` 有 119,601 项检查；`decoder` 保留三种场景共用翻转代价的回归；`tep` 有 109,279 项检查、55 个场景；`gcd` 与独立全空间最小代价 oracle 核对 402 帧。
+`CMakeLists.txt` 注册十六个 CTest 测试；simulation_pair 现有 10972 项检查、111 对独立重放帧。S15 lcgcd_oracle 结果见上表。原 `lcgcd` 有 520 项检查、12 个固定 ML oracle 帧，`slva` 有 61,378 项检查、153 个穷举图，`viterbi` 有 2461 项检查、60 个图，`trellis` 有 8022 项检查、39 个图，`local_constraints` 有 4049 项检查、82 组划分，`simulation` 有 518 项检查，`simulation_cli` 有 19 个场景，`channel` 有 105 项检查，`cli_smoke` 有 49 个场景；`gf2` 有 1,598 项检查；`systematic` 有 119,601 项检查；`decoder` 保留三种场景共用翻转代价的回归；`tep` 有 109,279 项检查、55 个场景；`gcd` 与独立全空间最小代价 oracle 核对 402 帧。
 
-进入 S14 时的实际基线为 12/13，cli_smoke 的连续 trace 文本检查被用户堆打印打断。本轮保留打印，改为提取 trace 后核对顺序，并允许错误场景同时打印 stdout 调试信息；仍检查状态码、错误内容及成功场景无 stderr。WSL CTest 为 14/14 通过，ASan/UBSan 含泄漏检查运行 LC-GCD 集成测试无报告。
+进入 S17 时 WSL 基线为 16/16；当前 CTest 为 16/16 通过，配对统计测试的 ASan/UBSan 含泄漏检查无报告。CSV/JSON 逐字段交叉检查，计时只排除出确定性文本比较，仍检查其非负有效性和缺失值格式。数值诊断按 S15 表格单独解读，不能将整个测试退出 0 等同于所有动态范围下严格 ML。
 
 TEP 测试覆盖乱序权重、全零、全相同权重、固定种子随机二进制小数、普通小数及大动态范围，检查顺序、精确 tie-break、空模式、无重复、完整性、输出位序、输入不变和结束状态。测试 oracle 枚举全部子集后 qsort，不调用生产 FPT/最小堆代码。
 
@@ -605,12 +682,12 @@ GCD oracle 在原始列坐标枚举全部 2^N 个翻转模式，直接计算 syn
 
 优先阅读：
 
-1. `src/decoders/decoder.c` 的 `gcd_decode`：共用流程中 SLVA 路径的 Ac 补齐、完整代价和下界判断。
-2. `tests/lcgcd_test.c`：独立完整翻转 oracle、11→2 手算例及预算/资源证明状态。
-3. `docs/trellis_slva_notes.md` 第 7 节：Algorithm 1 对应关系、初始化差别和早停依据。
+1. `src/search/tep.c` 的 push 和 `src/decoders/decoder.c` 的 finish：计数取值来源。
+2. `src/simulation/simulation.c` 的 run_frames/write_row：查询分布、CPU 时间及版本化输出。
+3. `docs/trellis_slva_notes.md` 第 10 节：40 个字段的单位、边界和缺失值约定。
 
 本节点新增源码独立编写；参考矩阵只在忽略的 build 目录转换验证，未作为项目数据分发。搜索正确性的依据是补齐映射和非负代价下界；小码 oracle 为实现提供回归证据。本轮没有进行大码吞吐实验或内存分配失败故障注入。
 
 ## 节点状态
 
-S00—S13 已通过节点推进验收；S14 完整 LC-GCD 与早停已实现，等待人工验收。下一候选节点是 S15：系统小码对照与 delta 边界验证；收到明确授权后才执行。
+S00—S16 已通过节点推进验收；S17 正式统计与结果文件已实现，等待人工验收。S15 的极端浮点限制继续保留。下一候选节点是 S18：SNR/delta 扫描与绘图；收到明确授权后才执行，尚未开始大量性能实验。

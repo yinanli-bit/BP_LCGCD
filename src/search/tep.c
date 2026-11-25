@@ -36,6 +36,7 @@ static TepStatus reserve(TepGenerator *g, size_t needed)
 //插入新候选，新候选上浮，比cost
 static void push(TepGenerator *g, TepNode node)
 {
+    ++g->partial_patterns_generated;
     size_t i = g->size++; //先赋值 后自增
     while (i && before(&node, &g->nodes[(i - 1) / 2])) {
         g->nodes[i] = g->nodes[(i - 1) / 2];

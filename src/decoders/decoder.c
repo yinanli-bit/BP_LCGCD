@@ -164,9 +164,12 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
         form->row_transform.rows != rows || form->row_transform.cols != rows || m > n || m > rows) {
         return result->status = DECODE_DIMENSION_MISMATCH;
     }
-    bool lc = strcmp(config->decoder_name, "lcgcd") == 0;
+    
+    /* delta=0 reduces exactly to GCD, including TEP ties and budget counts. */
+    bool lc = strcmp(config->decoder_name, "lcgcd") == 0 && config->delta != 0;
     size_t k = n - m, delta = lc ? config->delta : 0;
-    if (delta > m) return result->status = DECODE_DIMENSION_MISMATCH;
+    if (delta > m) 
+        return result->status = DECODE_DIMENSION_MISMATCH;
     if (lc && ((m && k > SIZE_MAX/m) || n > SIZE_MAX/sizeof(size_t)))
         return result->status = DECODE_ALLOCATION_FAILED;
     size_t stages = lc ? delta+k : k;
@@ -175,9 +178,11 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
     BitVector *buffers[] = {&reference, &residual, &transformed, &system, &partial, &original, &scratch, &local_rhs};
     const size_t lengths[] = {n, rows, rows, n, stages, n, rows, lc ? m : 0};
     TepGenerator generator = {0};
+
     SlvaGenerator list = {0};
     SyndromeTrellis trellis = {.length=stages};
     LocalConstraints local = {0};
+
     uint8_t *local_p = NULL;
     TepStatus tep_status = TEP_OK;
     SlvaStatus slva_status = SLVA_OK;
@@ -207,22 +212,23 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
         local.s_a = (BitVector){delta,local_rhs.data};
         local.s_ac = (BitVector){m-delta,local_rhs.data ? local_rhs.data+delta : NULL};
         gf2_status = local_constraints_prepare(form, weights, n, &residual, delta, &local, &transformed);
-    } else gf2_status = binary_systematic_transform_syndrome(form, &residual, &transformed);
+    } 
+    else {
+        gf2_status = binary_systematic_transform_syndrome(form, &residual, &transformed);
+    }
     if (gf2_status != GF2_OK) {
         status = gf2_status == GF2_INCONSISTENT_SYNDROME ?
                  DECODE_INCONSISTENT_SYNDROME : DECODE_INVALID_ARGUMENT;
         goto finish;
     }
     if (lc) {
-        TrellisStatus graph_status = syndrome_trellis_prepare(form, &local, weights, n,
-            config->state_limit ? config->state_limit : 4096, &trellis);
+        TrellisStatus graph_status = syndrome_trellis_prepare(form, &local, weights, n,config->state_limit ? config->state_limit : 4096, &trellis);
         if (graph_status != TRELLIS_OK) {
             slva_status = graph_status == TRELLIS_RESOURCE_LIMIT ? SLVA_RESOURCE_LIMIT :
                           graph_status == TRELLIS_NUMERIC_ERROR ? SLVA_NUMERIC_ERROR : SLVA_INVALID_ARGUMENT;
             goto slva_error;
         }
-        SlvaLimits limits = {.max_candidates=config->slva_max_candidates ? config->slva_max_candidates : 65536,
-            .max_bytes=config->slva_max_bytes ? config->slva_max_bytes : 64*1024*1024};
+        SlvaLimits limits = {.max_candidates=config->slva_max_candidates ? config->slva_max_candidates : 65536,.max_bytes=config->slva_max_bytes ? config->slva_max_bytes : 64*1024*1024};
         slva_status = slva_init(&list, &trellis, &limits);
         if (slva_status != SLVA_OK) goto slva_error;
     } else {
@@ -304,18 +310,23 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
         }
         partial_cost = cost;
         ++result->stats.candidates_popped;
+
+        // 补全完整的system，lcgcd分三步（k,delta,m-delta）,gcd分两步（k,m）
         memset(system.data, 0, m);
-        if (k) memcpy(system.data + m, partial.data + (lc ? delta : 0), k);
+        if (k) memcpy(system.data + m, partial.data + (lc ? delta : 0), k); // copy the last k bits
         if (lc) {
             for (size_t i = 0; i < delta; ++i)
-                system.data[form->orig_to_sys[local.basis_order[i]]] = partial.data[i];
-            BitVector free_bits = {k,system.data+m}, product = {m-delta,scratch.data};
+                system.data[form->orig_to_sys[local.basis_order[i]]] = partial.data[i]; //按照basis_order的顺序，把前delta个bit放到system中
+            BitVector free_bits = {k,system.data+m};
+            BitVector product = {m-delta,scratch.data}; //需要补全的bit
+            //P_Ac*f_Pᵀ
             if (m > delta && k && binary_matrix_multiply_vector(&local.p_ac, &free_bits, &product) != GF2_OK) {
                 status = DECODE_INVALID_ARGUMENT;
                 goto finish;
             }
             for (size_t i = 0; i < m-delta; ++i)
-                system.data[form->orig_to_sys[local.basis_order[delta+i]]] = local.s_ac.data[i] ^ (k ? scratch.data[i] : 0);
+                //f_I[Ac] = s_Ac XOR P_Ac*f_Pᵀ 补齐候选
+                system.data[form->orig_to_sys[local.basis_order[delta+i]]] = local.s_ac.data[i] ^ (k ? scratch.data[i] : 0); 
         } else if (m) {
             /* H_sys * (0,f_P)^T = P*f_P^T; views reuse S03 storage/scratch. */
             BinaryMatrix h_sys = {m, n, form->reduced.data};
@@ -324,18 +335,21 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
                 status = DECODE_INVALID_ARGUMENT;
                 goto finish;
             }
-            for (size_t i = 0; i < m; ++i) system.data[i] = transformed.data[i] ^ scratch.data[i];
+            for (size_t i = 0; i < m; ++i) 
+                //e_I=s XOR e_P P^T 补齐候选
+                system.data[i] = transformed.data[i] ^ scratch.data[i];
         }
+        //计算完整代价
         /* GCD: W_P+W_I; LC-GCD: W_local+W_Ac. Append nonnegative terms to
          * the enumerator's score, preserving its floating-point lower bound. */
         for (size_t i = lc ? delta : 0; i < m; ++i) {
             size_t original_column = lc ? local.basis_order[i] : form->sys_to_orig[i];
-            if (system.data[form->orig_to_sys[original_column]]) cost += weights[original_column];
+            if (system.data[form->orig_to_sys[original_column]]) 
+                cost += weights[original_column];
         }
         if (!isfinite(cost)) { status = DECODE_NUMERIC_ERROR; goto finish; }
         if (lc) {
-            if (binary_systematic_to_original(form, &system, &original) != GF2_OK ||
-                binary_matrix_multiply_vector(input->h, &original, &scratch) != GF2_OK) {
+            if (binary_systematic_to_original(form, &system, &original) != GF2_OK ||binary_matrix_multiply_vector(input->h, &original, &scratch) != GF2_OK) {
                 status = DECODE_INVALID_ARGUMENT;
                 goto finish;
             }
@@ -345,14 +359,18 @@ static DecodeStatus gcd_decode(const DecodeConfig *config, const DecodeInput *in
             }
         }
         ++result->stats.candidates_evaluated;
+
+        // Update the best candidate.
         bool improved = !result->candidate_valid || cost < result->cost;
         if (improved) {
+            //下面这一个判断条件，lcgcd跳过，gcd则计算binary_systematic_to_original
             if (!lc && binary_systematic_to_original(form, &system, &original) != GF2_OK) {
                 status = DECODE_INVALID_ARGUMENT;
                 goto finish;
             }
-            for (size_t j = 0; j < n; ++j) result->estimate.data[j] = reference.data[j] ^ original.data[j];
-            result->cost = cost;
+            for (size_t j = 0; j < n; ++j) 
+                result->estimate.data[j] = reference.data[j] ^ original.data[j]; //得到码字(classic)或错误模式(the other two)
+            result->cost = cost; //更新
             result->candidate_valid = true;
         }
         if (trace) {
@@ -378,6 +396,16 @@ tep_error:
              tep_status == TEP_NUMERIC_ERROR ? DECODE_NUMERIC_ERROR : DECODE_INVALID_ARGUMENT;
 finish:
     result->stats.nodes_expanded = lc ? list.nodes_expanded : generator.nodes_expanded;
+    // next_sequence = 根代表 + 已成功提交的 SLVA 子组代表。
+    result->stats.partial_patterns_generated = lc ? list.next_sequence : generator.partial_patterns_generated;
+    if (lc && list.cells) {
+        for (size_t stage=0; stage<trellis.length; ++stage) {
+            for (size_t state=0; state<trellis.state_count; ++state) {
+                if (isfinite(list.cells[stage*trellis.state_count+state].metric))
+                    ++result->stats.trellis_states_visited;
+            }
+        }
+    }
     if (result->candidate_valid) {
         /* Verify the returned best estimate against the ORIGINAL H/target. */
         int valid = binary_matrix_multiply_vector(input->h, &result->estimate, &scratch) == GF2_OK;

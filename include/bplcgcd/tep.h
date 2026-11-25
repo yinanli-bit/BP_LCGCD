@@ -21,6 +21,7 @@ typedef struct {
     size_t size;
     size_t capacity;
     uint64_t nodes_expanded; //出堆后生成至少一个孩子的父节点数
+    uint64_t partial_patterns_generated; //成功入堆的模式数，包含空根模式
 } TepGenerator;
 
 

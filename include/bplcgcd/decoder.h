@@ -23,7 +23,8 @@ typedef enum {
     DECODE_STOP_BOUND, //早停：未访问候选的部分代价下界不小于当前最佳完整代价
     DECODE_STOP_EXHAUSTED, //搜索空间耗尽，当前候选代价等于最优代价
     DECODE_STOP_BUDGET, //搜索空间未耗尽，但候选数达到预算限制
-    DECODE_STOP_RESOURCE //LC-GCD 的 Trellis/SLVA 资源预算不足，未证明最优
+    DECODE_STOP_RESOURCE, //LC-GCD 的 Trellis/SLVA 资源预算不足，未证明最优
+    DECODE_STOP_REASON_COUNT
 } DecodeStopReason;
 
 /*
@@ -63,10 +64,11 @@ typedef struct {
     uint64_t candidates_evaluated; //完成完整代价计算的候选数
     uint64_t nodes_expanded; //出堆后生成至少一个孩子的父节点数
     uint64_t batches;
+    uint64_t partial_patterns_generated; //已提交的部分模式代表数，包含根模式
+    uint64_t trellis_states_visited; //Viterbi 前向有限前缀状态的展开次数
 } DecoderStats;
 
-/*Read estimate/cost only when candidate_valid. GCD/LC-GCD set optimality_proven
- * only on a bound/exhaustion proof; check_candidate always leaves it false. */
+
 typedef struct {
     DecodeStatus status;
     BitVector estimate; //is v in CLASSICAL, e_hat otherwise
