@@ -15,12 +15,12 @@ void qbp_workspace_free(QbpWorkspace *w)
 
 QuantumStatus qbp_workspace_init(QbpWorkspace *w, const QuantumCode *code)
 {
-    if (!w || w->code || w->messages || w->hard_estimate || w->syndrome ||
-        !code || !code->hx.data) return QUANTUM_INVALID_ARGUMENT;
+    if (!w || w->code || w->messages || w->hard_estimate || w->syndrome ||!code || !code->hx.data) 
+        return QUANTUM_INVALID_ARGUMENT;
     size_t n = code->graph.cols, m = code->graph.rows, edges = code->graph.edge_count;
     size_t capacity = SIZE_MAX / sizeof(double);
-    if (n > capacity / 3 || edges > (capacity - 3*n) / 5 ||
-        n > SIZE_MAX / sizeof(Pauli)) return QUANTUM_INVALID_ARGUMENT;
+    if (n > capacity / 3 || edges > (capacity - 3*n) / 5 || n > SIZE_MAX / sizeof(Pauli)) 
+        return QUANTUM_INVALID_ARGUMENT;
     QbpWorkspace built = {.code=code};
     built.messages = calloc(5*edges + 3*n, sizeof(double));
     built.hard_estimate = malloc(n * sizeof(Pauli));
@@ -69,15 +69,15 @@ double qbp_commutation_llr(const double msg_xyz[3], Pauli stabilizer_pauli)
  * Copyright (C) ICAIS Lab at NJU. 2020 - 2021. All rights reserved
  * Original author: Yangcan Zhou, yczhou@smail.nju.edu.cn
  * Adapted: scalar commutation LLR from XYZ, syndrome sign, edge-indexed
- * workspace, floating clip. Quantum formulas: 2025 Eq. (6), (12).
+ * workspace, degree-one numerical policy. Quantum formulas: 2025 Eq. (6), (12).
  * Source commit and differences: docs/third_party_sources.md. */
 static QuantumStatus check_update(QbpWorkspace *w, const BitVector *measured,
-                                   double nms_scale, double clip)
+                                   double nms_scale, double singleton_message)
 {
     const QbpGraph *g = &w->code->graph;
     for (size_t row = 0; row < g->rows; ++row) {
         const QbpEdge *h = &g->row_header[row];
-        double min1 = clip, min2 = clip;
+        double min1 = INFINITY, min2 = INFINITY;
         size_t min_index = SIZE_MAX;
         unsigned parity = measured->data[row];
         for (const QbpEdge *e = h->right; e != h; e = e->right) {
@@ -99,7 +99,10 @@ static QuantumStatus check_update(QbpWorkspace *w, const BitVector *measured,
         }
         for (const QbpEdge *e = h->right; e != h; e = e->right) {
             size_t k = e->edge_index;
-            double magnitude = nms_scale * (k == min_index ? min2 : min1);
+            double minimum = k == min_index ? min2 : min1;
+            /* Only degree-one checks replace min(empty set)=+infinity. */
+            if (e->left == h && e->right == h) minimum = singleton_message;
+            double magnitude = nms_scale * minimum;
             unsigned negative = parity ^ (w->commutation[k] < 0);
             w->c2v[k] = negative ? -magnitude : magnitude;
         }
@@ -179,11 +182,11 @@ QuantumStatus qbp_decode(QbpWorkspace *w, const QbpConfig *config,
         w->v2c_z[k] = prior->prior_z[c];
         w->c2v[k] = 0;
     }
-    double clip = config->message_clip ? config->message_clip : 50;
+    double singleton_message = config->message_clip ? config->message_clip : 50;
     BitVector syndrome = {g->rows, w->syndrome};
     /* Flooding: complete all checks before any posterior/V2C updates. */
     for (size_t iteration = 0; iteration < config->max_iterations; ++iteration) {
-        QuantumStatus status = check_update(w, measured, config->nms_scale, clip);
+        QuantumStatus status = check_update(w, measured, config->nms_scale, singleton_message);
         if (status != QUANTUM_OK) 
             return status;
         

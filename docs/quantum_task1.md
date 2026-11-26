@@ -28,7 +28,7 @@
 
 使用自然对数和 double。commutation reduction 通过 log-sum-exp 等价式避免直接 `exp(-mu)` 溢出。prior 输入要求有限；概率到 prior 的接口要求四个概率严格为正，所以 depolarizing prior 使用 `0<p<1`；采样接口允许端点 `p=0/1`。
 
-degree-one check 的空集合 minimum 在数学上是正无穷。本轮使用明确的有限 C2V 数值上限 `message_clip`（0 取默认 50）；先对 minimum 限幅，再乘 `nms_scale`。一般 check 也采用同一上限。此为浮点无穷的数值近似，不是量化或新的停止准则；常规消息低于上限时完全对应论文公式。posterior/V2C 不限幅，若非有限则返回 numeric error。测试覆盖 singleton check、空行和孤立列。
+正常 degree >= 2 的 check 将 `min1/min2` 初始化为 `INFINITY`，严格计算排除本 edge 后的 `min |lambda|`，不做默认或显式 `message_clip` 饱和。`message_clip` 仅用于 degree-one check：将 `min(empty set)=+infinity` 局部替换为该有限正值（0 取默认 50），再乘 `nms_scale` 并应用 syndrome sign。这一局部数值近似不影响普通 check。posterior/V2C 不限幅，若非有限则返回 numeric error。测试覆盖普通 check 的 minimum 超过 50、显式 `message_clip=1` 不影响普通 check，以及 singleton 的默认/指定值、空行和孤立列。
 
 只有每轮消息更新后的真实 syndrome 匹配才设置 `syndrome_matched`，这不代表 logical success；TASK1 不输出 LER。相等 hard weight 按 I、X、Y、Z 顺序决胜。第一轮从 prior 开始，不增加论文以外的初始 prior 早停规则。
 
@@ -94,7 +94,7 @@ ctest --test-dir build/wsl-debug --output-on-failure
 ./build/wsl-debug/qbp_test
 ```
 
-结果：**18/18 CTest PASS**，包括原有 16 项经典回归。新增 quantum 测试 6455 项检查，QNMS 测试 31540 项检查。
+结果：**18/18 CTest PASS**，包括原有 16 项经典回归。新增 quantum 测试 6455 项检查，QNMS 测试 31704 项检查（含普通 check 不饱和、singleton 局部策略回归）。
 
 - 全部 `4^5=1024` Pauli errors：sparse quantum syndrome、独立 dense symplectic 计算、`Hsyn*[EX;EZ]` 三者一致。这是 syndrome oracle，不是 TASK2 的 quantum candidate/ML oracle。
 - Dense QNMS reference 使用概率质量直接求 commutation、逐 outgoing edge 排除邻居求 minimum、逐 incoming check 排除目的行求 extrinsic；不调用生产 commutation/min1/min2/syndrome/hard 函数。比较单轮和多轮 C2V、V2C、posterior、hard、早停次数；覆盖混合 XYZ edge、正/负/零 lambda、minimum ties、scale=0.625/1。
@@ -131,6 +131,6 @@ ASan/UBSan：**2/2 PASS**，开启 leak detection，无诊断。全新 sanitizer
 
 建议重点阅读三处：`quantum_code_init/build_graph` 的 Hx/Hz 到 edge Pauli 映射；`check_update` 的 syndrome sign 和排除本 edge 的 min1/min2；`posterior_update/variable_update` 的 anticommute 条件与 Eq. (10) 外信息。
 
-TASK1 没有未解决的消息数学桥接问题。有限 `message_clip` 的近似和严格正概率 prior 范围按前述数值约定公开保留；短 smoke 不用于推断阈值或 logical error rate。没有进行大规模性能实验。当前入口为库 API/测试程序，统一仿真平台属于 TASK3。
+TASK1 没有未解决的消息数学桥接问题。仅 degree-one check 使用有限 `message_clip` 的局部近似；普通 check 保留未饱和浮点 NMS。严格正概率 prior 范围按前述数值约定公开保留；短 smoke 不用于推断阈值或 logical error rate。没有进行大规模性能实验。当前入口为库 API/测试程序，统一仿真平台属于 TASK3。
 
 **TASK1 已完成，在 PAUSE A 停止。TASK2、TASK3 和旧 S18 及之后任务均未开始。** 所有项目改动保留为本地未暂存状态，未执行 add/commit/push。

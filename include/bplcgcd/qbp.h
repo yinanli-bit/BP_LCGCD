@@ -11,8 +11,9 @@ typedef struct {
 typedef struct {
     size_t max_iterations; /* Must be positive. */
     double nms_scale;      /* Direct multiplication, 0 < scale <= 1. */
-    double message_clip;   /* Finite positive C2V magnitude bound before scale;
-                            * zero selects 50. Numerical guard, not quantization. */
+    double message_clip;   /* Finite positive replacement for min(empty set) at
+                            * degree-one checks, before scale; zero selects 50.
+                            * Ignored for degree >= 2; no ordinary check clipping. */
 } QbpConfig;
 
 /* Owning, initialized with {0}; code must outlive workspace. Do not copy or

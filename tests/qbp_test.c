@@ -72,11 +72,13 @@ static DenseResult dense_reference(const Pauli *s, size_t m, size_t n,
         for (size_t r = 0; r < m; ++r) {
             for (size_t c = 0; c < n; ++c) {
                 if (s[r*n+c] == PAULI_I) continue;
-                double magnitude = clip;
+                double magnitude = INFINITY;
+                size_t neighbors = 0;
                 int sign = measured[r] ? -1 : 1;
                 for (size_t other = 0; other < n; ++other) {
                     Pauli label = s[r*n+other];
                     if (other == c || label == PAULI_I) continue;
+                    ++neighbors;
                     double masses[] = {1, exp(-out.v2c[r][other][0]),
                         exp(-out.v2c[r][other][1]), exp(-out.v2c[r][other][2])};
                     double commute = 0, anticommute = 0;
@@ -88,6 +90,7 @@ static DenseResult dense_reference(const Pauli *s, size_t m, size_t n,
                     if (lambda < 0) sign = -sign;
                     if (fabs(lambda) < magnitude) magnitude = fabs(lambda);
                 }
+                if (!neighbors) magnitude = clip;
                 out.c2v[r][c] = sign * cfg.nms_scale * magnitude;
             }
         }
@@ -270,6 +273,27 @@ static void test_dense_messages(void)
             compare_reference(&row_w, &result, &expected);
         }
     }
+    /* Ordinary checks remain unsaturated above 50, even with an explicit clip. */
+    double strong[3][MAX_N] = {{0}};
+    for (size_t p = 0; p < 3; ++p)
+        for (size_t c = 0; c < 4; ++c) strong[p][c] = 80 + 20*c;
+    const double clips[] = {0,1};
+    for (size_t k = 0; k < 2; ++k) {
+        for (unsigned bit = 0; bit < 2; ++bit) {
+            uint8_t syn[] = {(uint8_t)bit};
+            BitVector measured = {1,syn};
+            QbpPrior prior = {4,strong[0],strong[1],strong[2]};
+            QbpConfig cfg = {.max_iterations=1, .nms_scale=0.625, .message_clip=clips[k]};
+            QbpResult result;
+            CHECK(qbp_decode(&row_w, &cfg, &prior, &measured, &result) == QUANTUM_OK);
+            DenseResult expected = dense_reference(row, 1, 4, strong, syn, cfg);
+            compare_reference(&row_w, &result, &expected);
+            double sign = bit ? -1 : 1;
+            CHECK(near(row_w.c2v[0], sign*0.625*(100-log(2))));
+            for (size_t c = 1; c < 4; ++c)
+                CHECK(near(row_w.c2v[c], sign*0.625*(80-log(2))));
+        }
+    }
     qbp_workspace_free(&row_w);
     quantum_code_free(&row_code);
     qbp_workspace_free(&independent);
@@ -316,6 +340,14 @@ static void test_empty_singleton_and_ties(void)
     CHECK(w.c2v[0] == -25 && result.hard_estimate[0] == PAULI_X);
     CHECK(result.post_x[0] == -24 && result.post_y[0] == 1 && result.post_z[0] == -24);
     CHECK(result.post_x[1] == 1 && result.hard_estimate[1] == PAULI_I);
+    cfg.message_clip = 0; /* Default 50 applies only to this singleton. */
+    for (unsigned bit = 0; bit < 2; ++bit) {
+        syn_data[0] = (uint8_t)bit;
+        CHECK(qbp_decode(&w, &cfg, &prior, &measured, &result) == QUANTUM_OK);
+        CHECK(w.c2v[0] == (bit ? -31.25 : 31.25));
+        CHECK(result.syndrome_matched && result.iterations_used == 1);
+        CHECK(result.hard_estimate[0] == (bit ? PAULI_X : PAULI_I));
+    }
     values[0] = DBL_MAX;
     syn_data[0] = 0;
     cfg.nms_scale = 1;
