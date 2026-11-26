@@ -21,6 +21,9 @@
 # 0. 强制参考资料与来源优先级
 
 Codex 在开始相关模块编码前，**必须实际打开并阅读工作区 `./docs/` 中的三篇关键论文**，不能仅根据文件名、摘要、既有聊天总结或自身记忆实现公式。
+两个参考github工程仓库：
+https://github.com/yinanli-bit/GCDpsgrand.git 作为GCD算法的参考
+https://github.com/yinanli-bit/cpicic_decoder.git 作为BP/NMS算法的参考
 
 三篇关键参考文献为：
 

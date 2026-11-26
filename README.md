@@ -1,8 +1,14 @@
 # BP_LCGCD
 
-本项目按 [逐节点开发规范](BP_LCGCD_Codex_Stepwise_Prompt_v2.md) 开发，参考源码审计见 [S00 报告](docs/source_audit.md)。每个节点完成后等待人工审查，下一节点需要明确授权。所有项目改动保留在本地，由用户自行决定 Git 暂存、提交和推送。
+后续开发以 [BP_LCGCD 后续开发指南](docs/BP_LCGCD_Next_Development_Guide.md) 为准；[旧逐节点规范](BP_LCGCD_Codex_Stepwise_Prompt_v2.md) 的 S0～S17 保留为经典译码开发记录，不再推进旧 S18 及之后的路线。参考源码审计见 [S00 报告](docs/source_audit.md)。在指南的 PAUSE 节点等待人工审查，下一 TASK 需要明确授权。所有项目改动保留在本地，由用户自行决定 Git 暂存、提交和推送。
 
-## 当前范围：S17
+## 当前范围：TASK1 / PAUSE A
+
+TASK1 增加独立的 `bplcgcd_quantum` 库：generic `Hx/Hz`、stabilizer commutation 检查、`Hsyn=[Hz|Hx]`、四方向 sparse Pauli Tanner graph、depolarizing prior/采样，以及浮点 flooding quantum NMS。`qbp_decode` 输入独立的 prior XYZ LLR 和 measured syndrome，返回 hard Pauli estimate、posterior XYZ、迭代数和 syndrome 匹配标志；同一 code 可配多个独立消息 workspace。公式、接口、手算与验收证据见 [TASK1 记录](docs/quantum_task1.md)，改写来源见 [第三方记录](docs/third_party_sources.md)。
+
+量子入口当前是 C API 和 `quantum_test` / `qbp_test` 可运行例子；尚未接入经典 CLI 的 decoder registry。syndrome 匹配仅表示 QNMS 收敛，logical success、quantum LC-GCD 和 BP-LCGCD 属于 TASK2。已在 PAUSE A 停止。
+
+以下为保留的 S0～S17 经典功能。
 
 当前提供 GF(2) 运算、离线系统化、有序 TEP/SLVA 生成器，以及三种输入场景共用的单帧 GCD/LC-GCD 和 CLI/trace。`gcd`、`lcgcd` 已接入真实译码；其他四种算法仍明确返回 `NOT_IMPLEMENTED`，不静默替代。
 
@@ -670,9 +676,9 @@ CSV 与 JSON 使用同一组 40 个字段，schema_version=1。CSV 为表头加�
 
 ## 检查内容与代码位置
 
-`CMakeLists.txt` 注册十六个 CTest 测试；simulation_pair 现有 10972 项检查、111 对独立重放帧。S15 lcgcd_oracle 结果见上表。原 `lcgcd` 有 520 项检查、12 个固定 ML oracle 帧，`slva` 有 61,378 项检查、153 个穷举图，`viterbi` 有 2461 项检查、60 个图，`trellis` 有 8022 项检查、39 个图，`local_constraints` 有 4049 项检查、82 组划分，`simulation` 有 518 项检查，`simulation_cli` 有 19 个场景，`channel` 有 105 项检查，`cli_smoke` 有 49 个场景；`gf2` 有 1,598 项检查；`systematic` 有 119,601 项检查；`decoder` 保留三种场景共用翻转代价的回归；`tep` 有 109,279 项检查、55 个场景；`gcd` 与独立全空间最小代价 oracle 核对 402 帧。
+`CMakeLists.txt` 当前注册十八个 CTest 测试：原有十六项，加 `quantum` / `qbp`。量子测试覆盖 4^5 syndrome oracle、独立 dense 消息参考、单轮手算和 256 帧 replay，详情见 [TASK1 记录](docs/quantum_task1.md)。simulation_pair 现有 10972 项检查、111 对独立重放帧。S15 lcgcd_oracle 结果见上表。原 `lcgcd` 有 520 项检查、12 个固定 ML oracle 帧，`slva` 有 61,378 项检查、153 个穷举图，`viterbi` 有 2461 项检查、60 个图，`trellis` 有 8022 项检查、39 个图，`local_constraints` 有 4049 项检查、82 组划分，`simulation` 有 518 项检查，`simulation_cli` 有 19 个场景，`channel` 有 105 项检查，`cli_smoke` 有 49 个场景；`gf2` 有 1,598 项检查；`systematic` 有 119,601 项检查；`decoder` 保留三种场景共用翻转代价的回归；`tep` 有 109,279 项检查、55 个场景；`gcd` 与独立全空间最小代价 oracle 核对 402 帧。
 
-进入 S17 时 WSL 基线为 16/16；当前 CTest 为 16/16 通过，配对统计测试的 ASan/UBSan 含泄漏检查无报告。CSV/JSON 逐字段交叉检查，计时只排除出确定性文本比较，仍检查其非负有效性和缺失值格式。数值诊断按 S15 表格单独解读，不能将整个测试退出 0 等同于所有动态范围下严格 ML。
+进入 S17 时 WSL 基线为 16/16；S17 验证记录为 16/16 通过，配对统计测试的 ASan/UBSan 含泄漏检查无报告。CSV/JSON 逐字段交叉检查，计时只排除出确定性文本比较，仍检查其非负有效性和缺失值格式。数值诊断按 S15 表格单独解读，不能将整个测试退出 0 等同于所有动态范围下严格 ML。
 
 TEP 测试覆盖乱序权重、全零、全相同权重、固定种子随机二进制小数、普通小数及大动态范围，检查顺序、精确 tie-break、空模式、无重复、完整性、输出位序、输入不变和结束状态。测试 oracle 枚举全部子集后 qsort，不调用生产 FPT/最小堆代码。
 
@@ -690,4 +696,4 @@ GCD oracle 在原始列坐标枚举全部 2^N 个翻转模式，直接计算 syn
 
 ## 节点状态
 
-S00—S16 已通过节点推进验收；S17 正式统计与结果文件已实现，等待人工验收。S15 的极端浮点限制继续保留。下一候选节点是 S18：SNR/delta 扫描与绘图；收到明确授权后才执行，尚未开始大量性能实验。
+S0～S17 的旧路线在此结束，S15 的极端浮点限制继续保留。后续以新指南管理：TASK1 已完成，停在 PAUSE A 等待人工审查；TASK2、TASK3 及之后的优化尚未启动。
