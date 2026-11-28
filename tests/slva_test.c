@@ -104,6 +104,19 @@ static void verify(const BinarySystematic *form, const double *weights, const Bi
     CHECK(slva_next(&g,&path,&cost) == SLVA_DONE);
     slva_free(&g);
     CHECK(!g.trellis && !g.cells && !g.heap && !g.bytes_used);
+    /* Fixed storage must reproduce the existing iterator, including ties.
+     * Reset once with a pending group still live, then enumerate to exhaustion. */
+    CHECK(slva_workspace_init(&g,length,t.state_count,&generous) == SLVA_OK);
+    for (unsigned replay = 0; replay < 2; ++replay) {
+        CHECK(slva_workspace_reset(&g,&t) == SLVA_OK);
+        unsigned take = !replay && count > 3 ? 3 : count;
+        for (unsigned rank = 0; rank < take; ++rank) {
+            CHECK(slva_next(&g,&path,&cost) == SLVA_OK);
+            CHECK(pack(&path) == emitted[rank] && cost == oracle[rank].cost);
+        }
+        if (take == count) CHECK(slva_peek(&g,&cost) == SLVA_DONE);
+    }
+    slva_free(&g);
     /* Reinitialization and prefix limits must reproduce the very same list. */
     const uint64_t limits[] = {0,1,3,17,count};
     for (size_t trial = 0; trial < sizeof(limits)/sizeof(*limits); ++trial) {

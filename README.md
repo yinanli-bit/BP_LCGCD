@@ -2,11 +2,13 @@
 
 后续开发以 [BP_LCGCD 后续开发指南](docs/BP_LCGCD_Next_Development_Guide.md) 为准；[旧逐节点规范](BP_LCGCD_Codex_Stepwise_Prompt_v2.md) 的 S0～S17 保留为经典译码开发记录，不再推进旧 S18 及之后的路线。参考源码审计见 [S00 报告](docs/source_audit.md)。在指南的 PAUSE 节点等待人工审查，下一 TASK 需要明确授权。所有项目改动保留在本地，由用户自行决定 Git 暂存、提交和推送。
 
-## 当前范围：TASK1 / PAUSE A
+## 当前范围：TASK2 / PAUSE B
 
 TASK1 增加独立的 `bplcgcd_quantum` 库：generic `Hx/Hz`、stabilizer commutation 检查、`Hsyn=[Hz|Hx]`、四方向 sparse Pauli Tanner graph、depolarizing prior/采样，以及浮点 flooding quantum NMS。`qbp_decode` 输入独立的 prior XYZ LLR 和 measured syndrome，返回 hard Pauli estimate、posterior XYZ、迭代数和 syndrome 匹配标志；同一 code 可配多个独立消息 workspace。公式、接口、手算与验收证据见 [TASK1 记录](docs/quantum_task1.md)，改写来源见 [第三方记录](docs/third_party_sources.md)。
 
-量子入口当前是 C API 和 `quantum_test` / `qbp_test` 可运行例子；尚未接入经典 CLI 的 decoder registry。syndrome 匹配仅表示 QNMS 收敛，logical success、quantum LC-GCD 和 BP-LCGCD 属于 TASK2。已在 PAUSE A 停止。
+TASK2 在此基础上打通 `QNMS posterior → Pauli SWT → X/Z partial SWT → fixed-basis LC-GCD → full Pauli score → recovery`，并独立检查 `E XOR R` 是否属于 stabilizer row space。默认 BP syndrome 匹配时直接返回，支持 `BP_POST_ALWAYS` 对照策略。后处理默认使用 Pauli 下界的 Trivial 早停；可选择 DAI 阈值早停或关闭早停作 exhaustive 对照。binary partial cost 保留为枚举顺序，完整评分始终使用 Pauli SWT；DAI-only 停止不作最优性证明。公式、固定 basis 适配、下界证明及测试见 [量子早停补充](docs/quantum_early_stopping.md)；此前的接口和 PAUSE B 记录保留在 [TASK2 报告](docs/quantum_task2_.md)。
+
+量子入口当前是 C API 和 `quantum_test` / `qbp_test` / `quantum_decoder_test` 可运行例子；尚未接入经典 CLI 的 decoder registry。SLVA 增加可复用固定存储入口，保留原经典动态入口；量子 frame/search/logical 路径没有 malloc/free 或在线 GE。当前已停在 PAUSE B，TASK3 仿真平台尚未开始。
 
 以下为保留的 S0～S17 经典功能。
 
@@ -676,7 +678,7 @@ CSV 与 JSON 使用同一组 40 个字段，schema_version=1。CSV 为表头加�
 
 ## 检查内容与代码位置
 
-`CMakeLists.txt` 当前注册十八个 CTest 测试：原有十六项，加 `quantum` / `qbp`。量子测试覆盖 4^5 syndrome oracle、独立 dense 消息参考、单轮手算和 256 帧 replay，详情见 [TASK1 记录](docs/quantum_task1.md)。simulation_pair 现有 10972 项检查、111 对独立重放帧。S15 lcgcd_oracle 结果见上表。原 `lcgcd` 有 520 项检查、12 个固定 ML oracle 帧，`slva` 有 61,378 项检查、153 个穷举图，`viterbi` 有 2461 项检查、60 个图，`trellis` 有 8022 项检查、39 个图，`local_constraints` 有 4049 项检查、82 组划分，`simulation` 有 518 项检查，`simulation_cli` 有 19 个场景，`channel` 有 105 项检查，`cli_smoke` 有 49 个场景；`gf2` 有 1,598 项检查；`systematic` 有 119,601 项检查；`decoder` 保留三种场景共用翻转代价的回归；`tep` 有 109,279 项检查、55 个场景；`gcd` 与独立全空间最小代价 oracle 核对 402 帧。
+`CMakeLists.txt` 当前注册十九个 CTest 测试：原有十六项，加 `quantum` / `qbp` / `quantum_decoder`。TASK2 独立 4^n oracle、logical equivalence 和 single-scale 端到端验证见 [TASK2 记录](docs/quantum_task2_.md)。量子测试覆盖 4^5 syndrome oracle、独立 dense 消息参考、单轮手算和 256 帧 replay，详情见 [TASK1 记录](docs/quantum_task1.md)。simulation_pair 现有 10972 项检查、111 对独立重放帧。S15 lcgcd_oracle 结果见上表。原 `lcgcd` 有 520 项检查、12 个固定 ML oracle 帧，`slva` 当前有 75,170 项检查、153 个穷举图（含固定存储与原动态入口的逐条等价重放），`viterbi` 有 2461 项检查、60 个图，`trellis` 有 8022 项检查、39 个图，`local_constraints` 有 4049 项检查、82 组划分，`simulation` 有 518 项检查，`simulation_cli` 有 19 个场景，`channel` 有 105 项检查，`cli_smoke` 有 49 个场景；`gf2` 有 1,598 项检查；`systematic` 有 119,601 项检查；`decoder` 保留三种场景共用翻转代价的回归；`tep` 有 109,279 项检查、55 个场景；`gcd` 与独立全空间最小代价 oracle 核对 402 帧。
 
 进入 S17 时 WSL 基线为 16/16；S17 验证记录为 16/16 通过，配对统计测试的 ASan/UBSan 含泄漏检查无报告。CSV/JSON 逐字段交叉检查，计时只排除出确定性文本比较，仍检查其非负有效性和缺失值格式。数值诊断按 S15 表格单独解读，不能将整个测试退出 0 等同于所有动态范围下严格 ML。
 
@@ -696,4 +698,4 @@ GCD oracle 在原始列坐标枚举全部 2^N 个翻转模式，直接计算 syn
 
 ## 节点状态
 
-S0～S17 的旧路线在此结束，S15 的极端浮点限制继续保留。后续以新指南管理：TASK1 已完成，停在 PAUSE A 等待人工审查；TASK2、TASK3 及之后的优化尚未启动。
+S0～S17 的旧路线在此结束，S15 的极端浮点限制继续保留。后续以新指南管理：TASK1、TASK2 已完成，停在 PAUSE B 等待人工审查；TASK3 及之后的优化尚未启动。

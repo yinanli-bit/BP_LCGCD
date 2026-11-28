@@ -20,4 +20,14 @@
 
 实际资料为本地 `docs/` 的三篇 PDF，逐项公式到函数映射见 [TASK1 记录](quantum_task1.md)。2024 论文负责 stabilizer/symplectic 与 soft output 语义；2025 论文负责完整 XYZ quantum NMS 公式；2026 论文负责目标 single-scale 前端架构及直接乘法参数含义。没有从 classical 实现推导或替代 quantum 消息公式。
 
-原 GCD/LC-GCD 的参考审计继续见 [source_audit.md](source_audit.md) 和 [trellis_slva_notes.md](trellis_slva_notes.md)，本轮未修改它们及对应生产代码。
+原 GCD/LC-GCD 的参考审计继续见 [source_audit.md](source_audit.md) 和 [trellis_slva_notes.md](trellis_slva_notes.md)。TASK1 未修改这些笔记及其对应生产代码；TASK2 的相关扩展记录如下。
+
+## TASK2：复用边界
+
+本轮重新读取同一固定 commit 的 `dec.c`，通过 TASK1 的 `qbp_decode` 继续复用四方向图、min1/min2 与 flooding 组织；没有新增复制 cpicic 源码或使用其 classical 公式。既有版权/作者声明保留。
+
+Quantum LC-GCD 复用本项目 `local_constraints_prepare`、`syndrome_trellis_prepare`、Viterbi/SLVA 及固定 basis 重建语义。`SlvaGenerator` 仅增加具体的预分配 path pool、heap/prefix storage 和 reset 入口，同一分组搜索算法服务两种存储方式；旧动态入口、调试打印和经典评分/早停不改动。
+
+新增 posterior/partial SWT、完整 Pauli 评分、BP-LCGCD 调度、stabilizer row-space 检查与 oracle 独立编写。依据为本地 2024 BP-LCOSD、2025 low-complexity BP-OSD、2026 BP-LCGCD 和 Zheng/Ma 2024 LC-GCD 四篇 PDF。逐公式、函数和数学边界见 [TASK2 记录](quantum_task2_.md)。
+
+2026-11-27 全文复核后补齐 2025 Eq. (23) 的严格早停适配和 Eq. (24)～(26) 的 DAI 模式。保持现有 marginal SLVA 顺序，通过四个 Pauli SWT 分量推导下界修正 C；C 的证明属于本项目适配推导，不归于论文原文。DAI 对 Ac 使用明确的 qubit 投影约定，并与严格 proof 分离。详见 [量子早停补充](quantum_early_stopping.md)。本次没有新增第三方源码复制或修改经典搜索。

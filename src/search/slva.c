@@ -22,6 +22,11 @@ static SlvaStatus from_trellis(TrellisStatus status)
 
 static void *allocate(SlvaGenerator *g, size_t bytes, SlvaStatus *status)
 {
+    if (g->path_pool) {
+        if (!g->free_count) { *status = SLVA_RESOURCE_LIMIT; return NULL; }
+        *status = SLVA_OK;
+        return g->path_pool + g->free_slots[--g->free_count]*g->path_stride;
+    }
     if (bytes > g->limits.max_bytes-g->bytes_used) {
         *status = SLVA_RESOURCE_LIMIT;
         return NULL;
@@ -35,12 +40,19 @@ static void *allocate(SlvaGenerator *g, size_t bytes, SlvaStatus *status)
 
 static void release_path(SlvaGenerator *g, uint8_t *bits)
 {
+    if (g->path_pool) {
+        if (bits) g->free_slots[g->free_count++] = (size_t)(bits-g->path_pool)/g->path_stride;
+        return;
+    }
     if (bits) { free(bits); g->bytes_used -= g->trellis->length; }
 }
 
 /* Reserve room for heap nodes AND the path arrays about to be constructed. */
 static SlvaStatus reserve(SlvaGenerator *g, size_t needed, size_t path_bytes)
 {
+    if (g->path_pool)
+        return needed <= g->capacity && path_bytes/g->path_stride <= g->free_count ?
+               SLVA_OK : SLVA_RESOURCE_LIMIT;
     size_t available = g->limits.max_bytes-g->bytes_used;
     if (path_bytes > available) 
         return SLVA_RESOURCE_LIMIT;
@@ -98,11 +110,72 @@ static SlvaCandidate pop(SlvaGenerator *g)
 void slva_free(SlvaGenerator *g)
 {
     if (!g) return;
-    for (size_t i = 0; i < g->size; ++i) free(g->heap[i].bits);
-    free(g->pending.bits);
+    if (!g->path_pool) {
+        for (size_t i = 0; i < g->size; ++i) free(g->heap[i].bits);
+        free(g->pending.bits);
+    }
+    free(g->path_pool);
+    free(g->free_slots);
     free(g->heap);
     free(g->cells);
     *g = (SlvaGenerator){0};
+}
+
+SlvaStatus slva_workspace_init(SlvaGenerator *g, size_t length, size_t states,
+                                const SlvaLimits *limits)
+{
+    if (!g || g->cells || g->heap || !limits || !limits->max_candidates ||!limits->max_bytes || !states) 
+        return SLVA_INVALID_ARGUMENT;
+    if (length == SIZE_MAX || states > SIZE_MAX/(length+1) || length > SIZE_MAX-sizeof(SlvaCandidate)-sizeof(size_t)) 
+        return SLVA_RESOURCE_LIMIT;
+    
+    size_t count = (length+1)*states, stride = length ? length : 1;
+    size_t per_path = sizeof(SlvaCandidate)+sizeof(size_t)+stride; //代表每个路径需要多少字节
+
+    if (count > limits->max_bytes/sizeof(ViterbiCell)) 
+        return SLVA_RESOURCE_LIMIT;
+    
+    size_t bytes = count*sizeof(ViterbiCell);
+    if (limits->max_candidates > (limits->max_bytes-bytes)/per_path) 
+        return SLVA_RESOURCE_LIMIT;
+    SlvaGenerator built = {.limits=*limits, .capacity=limits->max_candidates,
+        .cell_capacity=count, .path_stride=stride,
+        .bytes_used=bytes+limits->max_candidates*per_path};
+    built.cells = malloc(bytes);
+    built.heap = malloc(built.capacity*sizeof(*built.heap));
+    built.path_pool = malloc(built.capacity*stride);
+    built.free_slots = malloc(built.capacity*sizeof(size_t));
+    if (!built.cells || !built.heap || !built.path_pool || !built.free_slots) {
+        slva_free(&built);
+        return SLVA_ALLOCATION_FAILED;
+    }
+    *g = built;
+    return SLVA_OK;
+}
+
+SlvaStatus slva_workspace_reset(SlvaGenerator *g, const SyndromeTrellis *t)
+{
+    if (!g || !g->path_pool || !t || !t->state_count || t->target >= t->state_count)
+        return SLVA_INVALID_ARGUMENT;
+    if (t->length > g->path_stride || t->length == SIZE_MAX || t->state_count > g->cell_capacity/(t->length+1)) 
+        return SLVA_RESOURCE_LIMIT;
+    g->trellis = t;
+    g->size = 0;
+    g->pending = (SlvaCandidate){0};
+    g->paths_returned = g->nodes_expanded = 0;
+    g->next_sequence = 1;
+    g->free_count = g->capacity;
+
+    for (size_t i = 0; i < g->capacity; ++i) 
+        g->free_slots[i] = g->capacity-1-i;
+    
+    uint8_t *bits = g->path_pool + g->free_slots[--g->free_count]*g->path_stride;
+    g->heap[0] = (SlvaCandidate){.bits=bits, .free_length=t->length};
+    BitVector path = {t->length,bits};
+    TrellisStatus status = viterbi_decode(t, g->cells, g->cell_capacity, &path, &g->heap[0].cost);
+    if (status == TRELLIS_OK) g->size = 1;
+    else release_path(g, bits);
+    return status == TRELLIS_NO_PATH ? SLVA_OK : from_trellis(status);
 }
 
 static void print_slva_heap(SlvaCandidate *heap, size_t size){

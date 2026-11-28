@@ -1526,7 +1526,8 @@ fixed basis + GE-free LC-GCD
 - quantum soft weight；
 - local constrained search 的语义；
 - simulation metrics；
-- early-stop ideas 作为对照。
+- early-stop ideas 作为对照，关注如何从LCOSD推至LC-GCD，哪些地方复用，哪些需要根据LC-GCD做调整；
+- 后处理的具体思想和与LC-GCD相关的部分的处理和实现。
 
 ### 不复用
 
@@ -1668,7 +1669,7 @@ nontrivial logical operator
 D\in\operatorname{rowspan}(S).
 \]
 
-即 residual 属于 stabilizer group。
+即 residual 属于 stabilizer group。也就是只要真实错误和译码得到的错误模式差一个 stabilizer，就认为 logical success。
 
 ---
 

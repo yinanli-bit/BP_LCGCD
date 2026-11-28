@@ -39,14 +39,28 @@ typedef struct {
     size_t bytes_used; //当前 SLVA 模块管理的内存占用量
     uint64_t paths_returned, next_sequence; //已经通过 slva_next() 输出的路径数量，为新候选分配的顺序号
     uint64_t nodes_expanded; /* Output groups successfully split into children. */
+    /* Optional fixed storage, owned by the reusable workspace entry below.
+     * NULL path_pool retains the original dynamically growing iterator. */
+    uint8_t *path_pool;
+    size_t *free_slots;
+    size_t path_stride, free_count, cell_capacity;
 } SlvaGenerator;
 
 
 SlvaStatus slva_init(SlvaGenerator *generator, const SyndromeTrellis *trellis, const SlvaLimits *limits);
 
+/* Allocate once for repeated frame decoding. Limits include all reserved
+ * storage; init requires an empty {0} generator. Reset/next/peek never allocate.
+ * Trellis is borrowed on reset and must fit the reserved length/state capacity.
+ * Both entry points use the same SLVA partitioning and stable candidate order. */
+SlvaStatus slva_workspace_init(SlvaGenerator *generator, size_t max_length,
+                                size_t max_states, const SlvaLimits *limits);
+SlvaStatus slva_workspace_reset(SlvaGenerator *generator, const SyndromeTrellis *trellis);
+
 SlvaStatus slva_next(SlvaGenerator *generator, BitVector *path, double *cost);
 
-/* Does not emit a path; may lazily expand the previous output and allocate.
+/* Does not emit a path; may lazily expand the previous output (and allocate
+ * only in the original dynamic mode).
  * Repeated successful peeks return the same next cost. */
 SlvaStatus slva_peek(SlvaGenerator *generator, double *cost);
 void slva_free(SlvaGenerator *generator);

@@ -32,7 +32,8 @@ typedef struct {
     QbpEdge *row_header, *col_header, *edges;
 } QbpGraph;
 
-/* Owning offline object; initialize with {0}, do not copy by value or mutate
+/* **hx,hz,hsyn,graph**: 
+ * Owning offline object; initialize with {0}, do not copy by value or mutate
  * its members after construction. Inputs are copied. Headers are circular:
  * traverse right/down until returning to the corresponding header. */
 typedef struct {
