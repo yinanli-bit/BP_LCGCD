@@ -1758,7 +1758,7 @@ SLVA
 
 到 TASK 3 时，decoder semantics 已基本稳定。
 
-这时正式学习 `cpicic_decoder` 的 simulation organization。
+这时正式学习 `cpicic_decoder` 的 simulation organization。不再使用之前的simulation，注意避免写过多不必要的测试程序，学习cpicic_decoder的main.c的组织形式，模块化，层次化，简洁性，可维护性，可读性（避免过长的注释）。being concise is a good habit.
 
 重点读取：
 
@@ -1783,7 +1783,7 @@ test / Makefile
 GCD vs LC-GCD
 ```
 
-paired simulation 应保留兼容 wrapper。
+paired simulation 应保留兼容 wrapper。以后计划接入更多 decoder，如：单BP，BP-OSD等基线算法仿真。
 
 新的 core runner：
 
@@ -1806,7 +1806,7 @@ same channel realization
 
 ---
 
-# 15. Classical 和 Quantum 仿真域分开
+# 15. Classical 和 Quantum 仿真域分开（现在新增一条要求：不做经典域，只做Quantum域即可，后面关于经典域的内容跳过）
 
 不要强行统一物理横轴。
 
@@ -2153,6 +2153,7 @@ LER vs p
 avg BP iterations vs p
 avg LC-GCD searches vs p
 LC-GCD invocation rate vs p
+对于某一个p，BP的收敛情况 vs 迭代次数。（p可调）
 ```
 
 ---
@@ -2555,60 +2556,3 @@ PAUSE C
 
 ---
 
-# 32. 当前最应该交给 Codex 的下一项任务
-
-**只执行 TASK 1。**
-
-目标：
-
-```text
-Generic Hx/Hz
-+ stabilizer validation
-+ cpicic-style four-direction sparse Pauli graph
-+ floating flooding quantum NMS
-+ posterior XYZ
-+ syndrome early stop
-```
-
-要求：
-
-```text
-必须实际读取三篇论文；
-必须实际参考 cpicic_decoder；
-不实现 classical BP 作为中间版本；
-不实现 LC-GCD quantum post-processing；
-不实现 quantization；
-不实现 multi-point sweep；
-不实现 multi-scale；
-不做 surface-specific code；
-不进行无关重构；
-不过度 defensive；
-不在 hot loop malloc/free。
-```
-
-完成后在 **PAUSE A** 停止，进行人工审查。
-
----
-
-# 33. 项目最终判断标准
-
-后续代码是否值得保留，优先看：
-
-1. 公式是否严格来自参考文献；
-2. quantum Pauli 语义是否正确；
-3. 是否保持 generic QLDPC；
-4. 是否真正复用了成熟的 sparse / simulation / quantization 工程思想；
-5. 是否避免 per-frame GE；
-6. 是否避免 hot-path allocation；
-7. GCD/LC-GCD regression 是否保持；
-8. LER 是否按 stabilizer equivalence 统计；
-9. float reference 是否足够清晰可作为量化 golden model；
-10. 未来硬件实现是否能清楚找到：
-    - message memory；
-    - check unit；
-    - variable unit；
-    - min1/min2；
-    - candidate search；
-    - latency / iteration / search count。
-
-**不要以代码量、抽象层数或 defensive check 数量衡量完成度。**

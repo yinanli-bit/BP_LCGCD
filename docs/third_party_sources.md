@@ -31,3 +31,7 @@ Quantum LC-GCD 复用本项目 `local_constraints_prepare`、`syndrome_trellis_p
 新增 posterior/partial SWT、完整 Pauli 评分、BP-LCGCD 调度、stabilizer row-space 检查与 oracle 独立编写。依据为本地 2024 BP-LCOSD、2025 low-complexity BP-OSD、2026 BP-LCGCD 和 Zheng/Ma 2024 LC-GCD 四篇 PDF。逐公式、函数和数学边界见 [TASK2 记录](quantum_task2_.md)。
 
 2026-11-27 全文复核后补齐 2025 Eq. (23) 的严格早停适配和 Eq. (24)～(26) 的 DAI 模式。保持现有 marginal SLVA 顺序，通过四个 Pauli SWT 分量推导下界修正 C；C 的证明属于本项目适配推导，不归于论文原文。DAI 对 Ac 使用明确的 qubit 投影约定，并与严格 proof 分离。详见 [量子早停补充](quantum_early_stopping.md)。本次没有新增第三方源码复制或修改经典搜索。
+
+## TASK3：简化的 Quantum main
+
+重新读取固定 commit `439fd79012971bc46f8aa4cdf711f5e81f94b6cb` 的 `main.c`，重点参考 `SnglThrdCodecStatistic`、point loop 和 main 的参数/矩阵/信道/decoder 初始化顺序。新逻辑直接写在本项目 `src/apps/main.c`：一次初始化、point/frame loop、共享物理帧、两算法统计、逐点 CSV。采用接近参考的 `QuantumSimPara`、`errFrmNum/iterNum/frmNum` 命名；没有复制第三方代码或引入其 classical 译码公式。TASK1/TASK2 既有版权及算法保持不变。使用说明见 [quantum_task3.md](quantum_task3.md)。

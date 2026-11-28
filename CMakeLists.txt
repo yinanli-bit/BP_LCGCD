@@ -7,20 +7,19 @@ add_library(bplcgcd_gf2 STATIC src/core/gf2.c src/core/systematic.c)
 target_include_directories(bplcgcd_gf2 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(bplcgcd_decoder STATIC src/decoders/decoder.c)
 target_link_libraries(bplcgcd_decoder PUBLIC bplcgcd_gf2 bplcgcd_search)
-target_link_libraries(bp_lcgcd PRIVATE bplcgcd_decoder)
 add_library(bplcgcd_search STATIC src/search/tep.c src/search/local_constraints.c src/search/trellis.c src/search/viterbi.c src/search/slva.c)
 target_link_libraries(bplcgcd_search PUBLIC bplcgcd_gf2)
 add_library(bplcgcd_channel STATIC src/channel/channel.c)
 target_link_libraries(bplcgcd_channel PUBLIC bplcgcd_gf2)
 add_library(bplcgcd_quantum STATIC src/core/quantum.c src/channel/quantum_channel.c src/decoders/qbp.c src/decoders/quantum_soft.c src/decoders/quantum_decoder.c)
 target_link_libraries(bplcgcd_quantum PUBLIC bplcgcd_gf2 bplcgcd_search)
+target_link_libraries(bp_lcgcd PRIVATE bplcgcd_quantum)
 if(NOT MSVC)
     target_link_libraries(bplcgcd_channel PUBLIC m)
     target_link_libraries(bplcgcd_quantum PUBLIC m)
 endif()
 add_library(bplcgcd_simulation STATIC src/simulation/simulation.c)
 target_link_libraries(bplcgcd_simulation PUBLIC bplcgcd_channel bplcgcd_decoder)
-target_link_libraries(bp_lcgcd PRIVATE bplcgcd_simulation)
 
 foreach(target IN ITEMS bp_lcgcd bplcgcd_gf2 bplcgcd_decoder bplcgcd_search bplcgcd_channel bplcgcd_simulation bplcgcd_quantum)
     set_target_properties(${target} PROPERTIES
@@ -37,17 +36,6 @@ endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
-    add_test(NAME cli_smoke
-        COMMAND "${CMAKE_COMMAND}"
-            "-DCLI_EXECUTABLE=$<TARGET_FILE:bp_lcgcd>"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake"
-    )
-    set_tests_properties(cli_smoke PROPERTIES TIMEOUT 10)
-    add_test(NAME simulation_cli COMMAND "${CMAKE_COMMAND}"
-        "-DCLI_EXECUTABLE=$<TARGET_FILE:bp_lcgcd>"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/simulation_cli.cmake")
-    set_tests_properties(simulation_cli PROPERTIES TIMEOUT 15)
-
     foreach(test IN ITEMS gf2 systematic decoder tep gcd lcgcd lcgcd_oracle channel simulation simulation_pair local_constraints trellis viterbi slva quantum qbp quantum_decoder)
         add_executable(${test}_test tests/${test}_test.c)
         if(test STREQUAL "quantum" OR test STREQUAL "qbp" OR test STREQUAL "quantum_decoder")
@@ -91,4 +79,11 @@ if(BUILD_TESTING)
     endforeach()
     set_tests_properties(lcgcd_oracle PROPERTIES TIMEOUT 30)
     set_tests_properties(quantum_decoder PROPERTIES TIMEOUT 30)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME quantum_sim_cli COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/quantum_sim_cli.py" "$<TARGET_FILE:bp_lcgcd>"
+            "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/quantum-sim")
+        set_tests_properties(quantum_sim_cli PROPERTIES TIMEOUT 30)
+    endif()
 endif()

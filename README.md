@@ -2,13 +2,26 @@
 
 后续开发以 [BP_LCGCD 后续开发指南](docs/BP_LCGCD_Next_Development_Guide.md) 为准；[旧逐节点规范](BP_LCGCD_Codex_Stepwise_Prompt_v2.md) 的 S0～S17 保留为经典译码开发记录，不再推进旧 S18 及之后的路线。参考源码审计见 [S00 报告](docs/source_audit.md)。在指南的 PAUSE 节点等待人工审查，下一 TASK 需要明确授权。所有项目改动保留在本地，由用户自行决定 Git 暂存、提交和推送。
 
-## 当前范围：TASK2 / PAUSE B
+## 当前范围：TASK3 / PAUSE C
+
+Quantum 对比仿真直接位于现有 `src/apps/main.c`，使用原 `bp_lcgcd --quantum` 入口，固定比较 QNMS 与 BP-LCGCD。常用参数集中在 [run_quantum_sim.sh](run_quantum_sim.sh) 开头；运行后只写简单 CSV，绘图脚本只输出 LER、平均 BP iterations、平均 LC candidates 三张 PNG。流程、参数、输入矩阵格式和验证见 [TASK3 报告](docs/quantum_task3.md)。
+
+```bash
+cmake -S . -B build/quantum -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build/quantum -j 4
+./run_quantum_sim.sh
+python3 tools/plot_quantum.py results/quantum/run.csv
+```
+
+作图需 matplotlib。当前 main.c 只保留 Quantum 仿真与帮助入口，已删除旧经典单帧、AWGN 单点/配对、SLVA demo 及其参数解析。旧 CLI 的两项测试注册已移除，保留 17 项库测试和一个 Quantum CLI 测试，共 18 项。TASK1/TASK2 的数学与算法实现未改动。
+
+以下的经典 CLI 命令与 S0～S17 内容是历史开发记录，不再属于当前 executable 的入口；经典算法库及 API 单元测试仍然保留。
 
 TASK1 增加独立的 `bplcgcd_quantum` 库：generic `Hx/Hz`、stabilizer commutation 检查、`Hsyn=[Hz|Hx]`、四方向 sparse Pauli Tanner graph、depolarizing prior/采样，以及浮点 flooding quantum NMS。`qbp_decode` 输入独立的 prior XYZ LLR 和 measured syndrome，返回 hard Pauli estimate、posterior XYZ、迭代数和 syndrome 匹配标志；同一 code 可配多个独立消息 workspace。公式、接口、手算与验收证据见 [TASK1 记录](docs/quantum_task1.md)，改写来源见 [第三方记录](docs/third_party_sources.md)。
 
 TASK2 在此基础上打通 `QNMS posterior → Pauli SWT → X/Z partial SWT → fixed-basis LC-GCD → full Pauli score → recovery`，并独立检查 `E XOR R` 是否属于 stabilizer row space。默认 BP syndrome 匹配时直接返回，支持 `BP_POST_ALWAYS` 对照策略。后处理默认使用 Pauli 下界的 Trivial 早停；可选择 DAI 阈值早停或关闭早停作 exhaustive 对照。binary partial cost 保留为枚举顺序，完整评分始终使用 Pauli SWT；DAI-only 停止不作最优性证明。公式、固定 basis 适配、下界证明及测试见 [量子早停补充](docs/quantum_early_stopping.md)；此前的接口和 PAUSE B 记录保留在 [TASK2 报告](docs/quantum_task2_.md)。
 
-量子入口当前是 C API 和 `quantum_test` / `qbp_test` / `quantum_decoder_test` 可运行例子；尚未接入经典 CLI 的 decoder registry。SLVA 增加可复用固定存储入口，保留原经典动态入口；量子 frame/search/logical 路径没有 malloc/free 或在线 GE。当前已停在 PAUSE B，TASK3 仿真平台尚未开始。
+TASK1/TASK2 提供 C API 和 `quantum_test` / `qbp_test` / `quantum_decoder_test` 例子。TASK3 直接调用这些 API，不改变已有的 QNMS、SWT、搜索、评分、早停或 logical check。量子 frame/search/logical 路径继续复用工作区。
 
 以下为保留的 S0～S17 经典功能。
 
@@ -698,4 +711,4 @@ GCD oracle 在原始列坐标枚举全部 2^N 个翻转模式，直接计算 syn
 
 ## 节点状态
 
-S0～S17 的旧路线在此结束，S15 的极端浮点限制继续保留。后续以新指南管理：TASK1、TASK2 已完成，停在 PAUSE B 等待人工审查；TASK3 及之后的优化尚未启动。
+S0～S17 的旧路线在此结束，S15 的极端浮点限制继续保留。TASK1/TASK2 完成内容保持原样；TASK3 按本次简化要求重新实现，在 PAUSE C 停止。后续优化未启动。
